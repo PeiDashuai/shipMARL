@@ -13,10 +13,11 @@ CLI utilities:
   - python -m staging.acceptance
 """
 
-from .recorder import StagingIdentity, StageRecorder, StagingRecorder
+from .recorder import StagingIdentity, StageRecorder, StagingRecorder, RunIdentity
 
 __all__ = [
     "StagingIdentity",
     "StageRecorder",
     "StagingRecorder",
+    "RunIdentity",
 ]

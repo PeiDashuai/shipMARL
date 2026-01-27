@@ -36,18 +36,24 @@ def validate_out_dir(out_dir: str, mode: str) -> Dict[str, Any]:
     if not s4_files:
         raise FileNotFoundError(f"[validate] no stage4 event shards found in: {stage4_dir}")
 
-    # stage3: episode_uid -> count
+    # stage3: episode_uid -> count (only count "episode" records, skip "comm_stats")
     s3_count = 0
+    s3_comm_stats_count = 0
     s3_uid_counts: Dict[str, int] = {}
+    valid_s3_types = {"episode", "comm_stats"}
     for fp in s3_files:
         for rec in _iter_jsonl(fp):
-            if rec.get("type") != "episode":
-                raise RuntimeError(f"[validate] invalid stage3 record type in {fp}: {rec.get('type')}")
+            rec_type = rec.get("type")
+            if rec_type not in valid_s3_types:
+                raise RuntimeError(f"[validate] invalid stage3 record type in {fp}: {rec_type}")
             uid = rec.get("episode_uid", None)
             if not isinstance(uid, str) or not uid:
                 raise RuntimeError(f"[validate] stage3 record missing episode_uid in {fp}")
-            s3_uid_counts[uid] = s3_uid_counts.get(uid, 0) + 1
-            s3_count += 1
+            if rec_type == "episode":
+                s3_uid_counts[uid] = s3_uid_counts.get(uid, 0) + 1
+                s3_count += 1
+            elif rec_type == "comm_stats":
+                s3_comm_stats_count += 1
 
     dup_uids = [u for u, c in s3_uid_counts.items() if c != 1]
     if dup_uids:

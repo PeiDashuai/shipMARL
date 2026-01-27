@@ -158,7 +158,7 @@ class MiniShipAISCommsEnv:
         ship_ids = sorted(true_states.keys())
 
         # reset AIS and PF
-        self._ais.reset(ship_ids=ship_ids, t0=t0, agent_map=self._agent_of_ship)
+        self._ais.reset(ships=ship_ids, t0=t0, agent_map=self._agent_of_ship)
         self._track_mgr.reset(ship_ids=ship_ids, t0=t0, init_states=true_states, agent_ids=self._int_agents)
         self._track_mgr.set_agent_ship_map(self._agent_of_ship)
 

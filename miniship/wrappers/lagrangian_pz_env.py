@@ -83,6 +83,11 @@ class MiniShipLagrangianParallelEnv(ParallelEnv):
     # ---------- PettingZoo 标准接口转发 ----------
 
     @property
+    def state(self):
+        """Expose underlying core env state for AIS comms integration."""
+        return getattr(self.core, "state", None)
+
+    @property
     def observation_spaces(self):
         # PettingZoo 并行 env 约定：dict[agent] -> space
         # 注意：这里用 self.env（可能已经包了 AIS），不是 self.core

@@ -28,24 +28,45 @@ Time conventions:
 
 from dataclasses import dataclass
 from typing import Any, Dict
+import math
 
 ShipId = int
 AgentId = str
 Ts = float
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass
 class RawTxMsg:
     """
     Raw message emitted by a ship's AIS transmitter (before channel effects).
+
+    Fields:
+      - msg_id: unique message identifier
+      - tx_ship: transmitting ship id
+      - mmsi: MMSI number
+      - tx_ts_true: true transmission timestamp (seconds)
+      - x, y: position (ENU/world coordinates)
+      - sog: speed over ground (m/s)
+      - cog: course over ground (rad, ENU convention)
     """
-    ship_id: ShipId
-    t_tx: Ts
+    msg_id: str
+    tx_ship: ShipId
+    mmsi: int
+    tx_ts_true: Ts
     x: float
     y: float
     sog: float
     cog: float  # yaw_east_ccw_rad (ENU, rad)
     meta: Dict[str, Any] | None = None
+
+    # Legacy alias for ship_id
+    @property
+    def ship_id(self) -> ShipId:
+        return self.tx_ship
+
+    @property
+    def t_tx(self) -> Ts:
+        return self.tx_ts_true
 
 
 @dataclass(frozen=True, slots=True)
@@ -55,14 +76,30 @@ class RxMsg:
 
     reported_* fields are the *received* values (may be noisy).
     """
-    ship_id: ShipId
-    arrival_t: Ts
-    reported_t: Ts
+    msg_id: str
+    rx_agent: AgentId
+    mmsi: int
     reported_x: float
     reported_y: float
     reported_sog: float
     reported_cog: float  # yaw_east_ccw_rad (ENU, rad)
+    reported_ts: Ts
+    arrival_time: Ts
+    age: float
     meta: Dict[str, Any] | None = None
+
+    # Legacy aliases
+    @property
+    def ship_id(self) -> ShipId:
+        return self.mmsi
+
+    @property
+    def arrival_t(self) -> Ts:
+        return self.arrival_time
+
+    @property
+    def reported_t(self) -> Ts:
+        return self.reported_ts
 
 
 @dataclass(frozen=True, slots=True)
@@ -85,6 +122,16 @@ class TrueState:
 
     @property
     def yaw_sim_rad(self) -> float:
+        return self.yaw_east_ccw_rad
+
+    @property
+    def sog(self) -> float:
+        """Speed over ground (m/s), derived from vx, vy."""
+        return math.hypot(self.vx, self.vy)
+
+    @property
+    def cog(self) -> float:
+        """Course over ground (rad, ENU convention: East=0, CCW+)."""
         return self.yaw_east_ccw_rad
 
 

@@ -36,6 +36,10 @@ class StagingIdentity:
         }
 
 
+# Alias: env-side code may import RunIdentity (same semantics)
+RunIdentity = StagingIdentity
+
+
 class StageRecorder:
     """Strict jsonl recorder for stage3 + stage4.
 
@@ -95,7 +99,12 @@ class StageRecorder:
             f.flush()
             os.fsync(f.fileno())
 
-    def emit_stage3_episode(self, episode_uid: str, payload: Dict[str, Any]) -> None:
+    def emit_stage3_episode(
+        self,
+        episode_uid: str,
+        payload: Dict[str, Any],
+        episode_idx: int | None = None,
+    ) -> None:
         """Write exactly one stage3 record per episode_uid."""
         if not episode_uid or not isinstance(episode_uid, str):
             raise ValueError("episode_uid must be non-empty str")
@@ -109,6 +118,8 @@ class StageRecorder:
             "episode_uid": episode_uid,
             **self.ident.as_dict(),
         }
+        if episode_idx is not None:
+            rec["episode_idx"] = episode_idx
         if payload:
             if not isinstance(payload, dict):
                 raise TypeError("payload must be dict")
@@ -116,20 +127,70 @@ class StageRecorder:
 
         self._append_jsonl(self._stage3_path, rec)
 
-    def emit_stage4_event(self, episode_uid: str, event: Dict[str, Any]) -> None:
-        """Write a stage4 event; must contain episode_uid."""
+    def emit_stage3_comm_stats(
+        self,
+        episode_uid: str,
+        step_idx: int,
+        payload: Dict[str, Any],
+    ) -> None:
+        """Write a stage3 communication stats record for a step."""
         if not episode_uid or not isinstance(episode_uid, str):
             raise ValueError("episode_uid must be non-empty str")
-        if not isinstance(event, dict):
-            raise TypeError("event must be dict")
+        if not isinstance(payload, dict):
+            raise TypeError("payload must be dict")
+
+        rec = {
+            "type": "comm_stats",
+            "ts_wall": time.time(),
+            "episode_uid": episode_uid,
+            "step_idx": step_idx,
+            **self.ident.as_dict(),
+            "payload": payload,
+        }
+        self._append_jsonl(self._stage3_path, rec)
+
+    def emit_stage4_event(
+        self,
+        episode_uid: str | None = None,
+        event: Dict[str, Any] | str | None = None,
+        *,
+        stage3_episode_uid: str | None = None,
+        stage3_episode_idx: int | None = None,
+        payload: Dict[str, Any] | None = None,
+    ) -> None:
+        """Write a stage4 event; must contain episode_uid.
+
+        Supports two calling conventions:
+          1. emit_stage4_event(episode_uid, event_dict)  # original
+          2. emit_stage4_event(stage3_episode_uid=..., stage3_episode_idx=..., event=..., payload=...)  # env-side
+        """
+        # Resolve episode_uid (support both positional and keyword)
+        uid = episode_uid or stage3_episode_uid
+        if not uid or not isinstance(uid, str):
+            raise ValueError("episode_uid (or stage3_episode_uid) must be non-empty str")
+
+        # Resolve event content
+        if isinstance(event, dict):
+            event_data = event
+        elif isinstance(event, str):
+            event_data = {"event_type": event}
+            if payload and isinstance(payload, dict):
+                event_data["payload"] = payload
+        elif event is None and payload is not None:
+            event_data = payload
+        else:
+            raise TypeError("event must be dict or str, or provide payload")
 
         rec = {
             "type": "event",
             "ts_wall": time.time(),
-            "episode_uid": episode_uid,
+            "episode_uid": uid,
             **self.ident.as_dict(),
-            "event": event,
+            "event": event_data,
         }
+        if stage3_episode_idx is not None:
+            rec["episode_idx"] = stage3_episode_idx
+
         self._append_jsonl(self._stage4_path, rec)
 
     def close(self) -> None:
