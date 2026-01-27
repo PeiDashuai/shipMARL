@@ -1,12 +1,48 @@
+"""
+staging/validate.py — Validation for Stage-3/4 Recording System
+
+Validates:
+  1. Directory structure exists
+  2. All JSONL files are parseable
+  3. All records have required fields
+  4. Stage-4 events map to Stage-3 episodes
+  5. No duplicate episode_uids in episode records
+
+Record Types Accepted:
+  Stage-3: shard_header, episode_init, episode, step, comm_stats, pf_estimates, episode_end
+  Stage-4: shard_header, event
+"""
+
 from __future__ import annotations
 
 import argparse
 import json
 from pathlib import Path
-from typing import Any, Dict, Iterable, Tuple
+from typing import Any, Dict, Iterable, Set
+
+
+# Valid record types for each stage
+VALID_STAGE3_TYPES: Set[str] = {
+    "shard_header",     # Shard metadata
+    "episode_init",     # Comprehensive episode init (new)
+    "episode",          # Legacy episode init (backward compat)
+    "step",             # Per-step comprehensive data
+    "comm_stats",       # Per-step comm stats (legacy)
+    "pf_estimates",     # Per-step PF estimates
+    "episode_end",      # Episode end summary
+}
+
+VALID_STAGE4_TYPES: Set[str] = {
+    "shard_header",     # Shard metadata
+    "event",            # All events (start, end, collision, arrival, etc.)
+}
+
+# Types that count as episode records (for uniqueness check)
+EPISODE_RECORD_TYPES: Set[str] = {"episode_init", "episode"}
 
 
 def _iter_jsonl(path: Path) -> Iterable[Dict[str, Any]]:
+    """Iterate over JSONL file, yielding parsed records."""
     with path.open("r", encoding="utf-8") as f:
         for ln, line in enumerate(f, start=1):
             line = line.strip()
@@ -18,7 +54,22 @@ def _iter_jsonl(path: Path) -> Iterable[Dict[str, Any]]:
                 raise RuntimeError(f"[validate] json parse error: {path}:{ln}: {e}") from e
 
 
-def validate_out_dir(out_dir: str, mode: str) -> Dict[str, Any]:
+def validate_out_dir(out_dir: str, mode: str, verbose: bool = False) -> Dict[str, Any]:
+    """
+    Validate staging output directory structure and data integrity.
+
+    Args:
+        out_dir: Base output directory
+        mode: Mode subdirectory (train/eval)
+        verbose: Print detailed progress
+
+    Returns:
+        Dictionary of statistics
+
+    Raises:
+        FileNotFoundError: If required directories/files missing
+        RuntimeError: If data validation fails
+    """
     out = Path(out_dir)
     stage3_dir = out / "stage3" / mode
     stage4_dir = out / "stage4" / mode
@@ -36,69 +87,124 @@ def validate_out_dir(out_dir: str, mode: str) -> Dict[str, Any]:
     if not s4_files:
         raise FileNotFoundError(f"[validate] no stage4 event shards found in: {stage4_dir}")
 
-    # stage3: episode_uid -> count (only count "episode" records, skip "comm_stats")
-    s3_count = 0
-    s3_comm_stats_count = 0
+    # ---- Stage-3 validation ----
+    s3_stats = {
+        "episode_records": 0,
+        "step_records": 0,
+        "comm_stats_records": 0,
+        "pf_estimates_records": 0,
+        "episode_end_records": 0,
+        "shard_header_records": 0,
+    }
     s3_uid_counts: Dict[str, int] = {}
-    valid_s3_types = {"episode", "comm_stats"}
+
     for fp in s3_files:
+        if verbose:
+            print(f"  Validating: {fp}")
         for rec in _iter_jsonl(fp):
             rec_type = rec.get("type")
-            if rec_type not in valid_s3_types:
+
+            # Validate record type
+            if rec_type not in VALID_STAGE3_TYPES:
                 raise RuntimeError(f"[validate] invalid stage3 record type in {fp}: {rec_type}")
+
+            # Skip header for episode_uid check
+            if rec_type == "shard_header":
+                s3_stats["shard_header_records"] += 1
+                continue
+
+            # All non-header records must have episode_uid
             uid = rec.get("episode_uid", None)
             if not isinstance(uid, str) or not uid:
-                raise RuntimeError(f"[validate] stage3 record missing episode_uid in {fp}")
-            if rec_type == "episode":
-                s3_uid_counts[uid] = s3_uid_counts.get(uid, 0) + 1
-                s3_count += 1
-            elif rec_type == "comm_stats":
-                s3_comm_stats_count += 1
+                raise RuntimeError(f"[validate] stage3 record missing episode_uid in {fp}: type={rec_type}")
 
+            # Count by type
+            if rec_type in EPISODE_RECORD_TYPES:
+                s3_uid_counts[uid] = s3_uid_counts.get(uid, 0) + 1
+                s3_stats["episode_records"] += 1
+            elif rec_type == "step":
+                s3_stats["step_records"] += 1
+            elif rec_type == "comm_stats":
+                s3_stats["comm_stats_records"] += 1
+            elif rec_type == "pf_estimates":
+                s3_stats["pf_estimates_records"] += 1
+            elif rec_type == "episode_end":
+                s3_stats["episode_end_records"] += 1
+
+    # Check for duplicate episode_uids
     dup_uids = [u for u, c in s3_uid_counts.items() if c != 1]
     if dup_uids:
         raise RuntimeError(f"[validate] stage3 duplicate episode_uid(s): {dup_uids[:10]} (showing first 10)")
 
-    # stage4: every event must map to exactly one stage3 record
-    s4_count = 0
-    missing = []
+    # ---- Stage-4 validation ----
+    s4_stats = {
+        "event_records": 0,
+        "shard_header_records": 0,
+    }
+    missing_uids = []
+
     for fp in s4_files:
+        if verbose:
+            print(f"  Validating: {fp}")
         for rec in _iter_jsonl(fp):
-            if rec.get("type") != "event":
-                raise RuntimeError(f"[validate] invalid stage4 record type in {fp}: {rec.get('type')}")
+            rec_type = rec.get("type")
+
+            # Validate record type
+            if rec_type not in VALID_STAGE4_TYPES:
+                raise RuntimeError(f"[validate] invalid stage4 record type in {fp}: {rec_type}")
+
+            # Skip header for episode_uid check
+            if rec_type == "shard_header":
+                s4_stats["shard_header_records"] += 1
+                continue
+
+            # All non-header records must have episode_uid
             uid = rec.get("episode_uid", None)
             if not isinstance(uid, str) or not uid:
                 raise RuntimeError(f"[validate] stage4 record missing episode_uid in {fp}")
-            if uid not in s3_uid_counts:
-                missing.append(uid)
-            s4_count += 1
 
-    if missing:
-        uniq = sorted(set(missing))
+            # Check that episode_uid exists in stage3
+            if uid not in s3_uid_counts:
+                missing_uids.append(uid)
+
+            s4_stats["event_records"] += 1
+
+    # Report missing UIDs
+    if missing_uids:
+        uniq = sorted(set(missing_uids))
         raise RuntimeError(f"[validate] stage4 episode_uid missing in stage3: {uniq[:10]} (showing first 10)")
 
-    if s3_count == 0:
-        raise RuntimeError("[validate] stage3 has zero records (smoke did not produce episodes)")
-    if s4_count == 0:
-        raise RuntimeError("[validate] stage4 has zero records (env did not emit any events)")
+    # Final checks
+    if s3_stats["episode_records"] == 0:
+        raise RuntimeError("[validate] stage3 has zero episode records (smoke did not produce episodes)")
+    if s4_stats["event_records"] == 0:
+        raise RuntimeError("[validate] stage4 has zero event records (env did not emit any events)")
 
+    # Build summary
     stats = {
-        "stage3_episode_records": s3_count,
-        "stage3_unique_episode_uids": len(s3_uid_counts),
-        "stage4_event_records": s4_count,
         "stage3_dir": str(stage3_dir),
         "stage4_dir": str(stage4_dir),
+        "stage3_files": len(s3_files),
+        "stage4_files": len(s4_files),
+        "stage3_episode_records": s3_stats["episode_records"],
+        "stage3_unique_episode_uids": len(s3_uid_counts),
+        "stage3_step_records": s3_stats["step_records"],
+        "stage3_comm_stats_records": s3_stats["comm_stats_records"],
+        "stage3_pf_estimates_records": s3_stats["pf_estimates_records"],
+        "stage3_episode_end_records": s3_stats["episode_end_records"],
+        "stage4_event_records": s4_stats["event_records"],
     }
     return stats
 
 
 def main() -> int:
     p = argparse.ArgumentParser(description="Validate staging out_dir (Phase-1/2 acceptance).")
-    p.add_argument("--out", required=True)
-    p.add_argument("--mode", default="train")
+    p.add_argument("--out", required=True, help="Output directory to validate")
+    p.add_argument("--mode", default="train", help="Mode subdirectory (train/eval)")
+    p.add_argument("-v", "--verbose", action="store_true", help="Verbose output")
     args = p.parse_args()
 
-    stats = validate_out_dir(args.out, args.mode)
+    stats = validate_out_dir(args.out, args.mode, verbose=args.verbose)
     print("[validate] OK")
     for k, v in sorted(stats.items()):
         print(f"  {k}: {v}")

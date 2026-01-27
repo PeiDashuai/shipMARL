@@ -1178,6 +1178,46 @@ class AISCommsSim:
         }
         return snap
 
+    def get_episode_params(self) -> Dict[str, Any]:
+        """
+        Get complete episode parameters for staging recording.
+
+        Returns a dict with:
+          - episode_params: raw sampled parameters for this episode
+          - effective: derived/computed parameters actually in use
+          - config_path: path to the config file used
+          - ep_seed: episode seed
+
+        This method is the single source of truth for episode-level AIS params.
+        """
+        from dataclasses import is_dataclass, asdict
+
+        result: Dict[str, Any] = {
+            "config_path": str(getattr(self, "cfg_path", "")),
+            "ep_seed": int(getattr(self, "_ep_seed", getattr(self, "ep_seed", 0))),
+        }
+
+        # Raw episode params
+        try:
+            ep = getattr(self, "_ep_params", None)
+            if ep is not None and is_dataclass(ep):
+                result["episode_params"] = asdict(ep)
+            elif hasattr(ep, "__dict__"):
+                result["episode_params"] = dict(ep.__dict__)
+            elif isinstance(ep, dict):
+                result["episode_params"] = ep
+            else:
+                result["episode_params"] = {}
+        except Exception:
+            result["episode_params"] = {}
+
+        # Effective params (computed at reset)
+        try:
+            result["effective"] = self._stage3_build_effective_snapshot()
+        except Exception:
+            result["effective"] = {}
+
+        return result
 
     def record_timeseries(self, t: Ts):
         m = self.metrics_snapshot()

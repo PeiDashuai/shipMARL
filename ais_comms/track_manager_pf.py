@@ -2721,6 +2721,124 @@ class AISTrackManagerPF:
         st.dbg_err_pos_max = 0.0
         st.dbg_err_pos_cnt = 0
 
+    def get_pf_estimates_for_staging(
+        self,
+        t: Ts,
+        true_states: Dict[ShipId, TrueState],
+    ) -> List[Dict[str, Any]]:
+        """
+        Get PF estimates for all ships with error metrics for staging recording.
+
+        Returns a list of dicts, one per ship, containing:
+          - ship_id
+          - Estimate: est_x, est_y, est_vx, est_vy, est_psi, est_sog
+          - Truth: true_x, true_y, true_vx, true_vy, true_psi, true_sog
+          - Errors: pos_error, vel_error, heading_error
+          - Track quality: track_age, num_particles, eff_particles
+        """
+        import math
+        results = []
+        t_env = float(t)
+
+        # Get all ship IDs from true_states
+        for sid, true_st in true_states.items():
+            sid = int(sid)
+
+            # Find PF estimate for this ship (from any agent that has it)
+            est_found = False
+            est_x, est_y, est_vx, est_vy, est_psi = 0.0, 0.0, 0.0, 0.0, 0.0
+            track_age = float("inf")
+            num_particles = 0
+            eff_particles = 0.0
+
+            for agent_id, agent_st in self.agent_states.items():
+                if agent_st is None:
+                    continue
+                tr = agent_st.tracks.get(sid, None)
+                if tr is None:
+                    continue
+
+                pf = tr.pf
+                if pf is None or pf.last_ts is None:
+                    continue
+
+                # Get estimate at current time
+                try:
+                    x_pred, _ = self._predict_x_readonly(pf, t_env)
+                    if x_pred is not None:
+                        est_x = float(x_pred[0])
+                        est_y = float(x_pred[1])
+                        est_vx = float(x_pred[2])
+                        est_vy = float(x_pred[3])
+                        est_psi = float(math.atan2(est_vy, est_vx))
+                        track_age = t_env - float(pf.last_ts)
+                        num_particles = int(getattr(pf, "N", 0))
+                        # Effective sample size estimation
+                        w = getattr(pf, "w", None)
+                        if w is not None and len(w) > 0:
+                            w_sum = float(sum(w))
+                            if w_sum > 0:
+                                w_norm = [wi / w_sum for wi in w]
+                                eff_particles = 1.0 / sum(wi * wi for wi in w_norm) if sum(wi * wi for wi in w_norm) > 0 else 0.0
+                        est_found = True
+                        break
+                except Exception:
+                    continue
+
+            # Compute truth values
+            true_x = float(true_st.x)
+            true_y = float(true_st.y)
+            true_vx = float(true_st.vx)
+            true_vy = float(true_st.vy)
+            true_psi = float(true_st.yaw_east_ccw_rad)
+            true_sog = float(true_st.sog)
+
+            # Compute errors
+            if est_found:
+                est_sog = math.hypot(est_vx, est_vy)
+                pos_error = math.hypot(est_x - true_x, est_y - true_y)
+                vel_error = abs(est_sog - true_sog)
+                heading_error = est_psi - true_psi
+                # Wrap to [-pi, pi]
+                while heading_error > math.pi:
+                    heading_error -= 2 * math.pi
+                while heading_error < -math.pi:
+                    heading_error += 2 * math.pi
+            else:
+                # No estimate found - use truth as fallback with zero error
+                est_x, est_y = true_x, true_y
+                est_vx, est_vy = true_vx, true_vy
+                est_psi = true_psi
+                est_sog = true_sog
+                pos_error = 0.0
+                vel_error = 0.0
+                heading_error = 0.0
+                track_age = 0.0
+
+            results.append({
+                "ship_id": sid,
+                "est_found": est_found,
+                "est_x": est_x,
+                "est_y": est_y,
+                "est_vx": est_vx,
+                "est_vy": est_vy,
+                "est_psi": est_psi,
+                "est_sog": math.hypot(est_vx, est_vy) if est_found else true_sog,
+                "true_x": true_x,
+                "true_y": true_y,
+                "true_vx": true_vx,
+                "true_vy": true_vy,
+                "true_psi": true_psi,
+                "true_sog": true_sog,
+                "pos_error": pos_error,
+                "vel_error": vel_error,
+                "heading_error": heading_error,
+                "track_age": track_age if track_age != float("inf") else -1.0,
+                "num_particles": num_particles,
+                "eff_particles": eff_particles,
+            })
+
+        return results
 
     # -------------------------------------------------------
     def ingest(
