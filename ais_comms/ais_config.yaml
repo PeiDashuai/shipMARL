@@ -1,0 +1,90 @@
+# === AIS domain randomization config ===
+seed_base: 2025
+
+episode:
+  # 每个 episode 采样一次；可选“固定/随机/分布”
+  sampling: default   # default | heavy | custom
+
+channel:  # Gilbert–Elliott链路 + 额外突发丢包段
+  ge:
+    p_g2b: [0.02, 0.12]      # 好->坏 转移概率 U[a,b]
+    p_b2g: [0.20, 0.60]      # 坏->好 转移概率 U[a,b]
+    drop_bad: [0.65, 0.95]   # 坏态丢包率 U[a,b]
+  burst:
+    enable: true
+    prob: 0.02               # 触发概率
+    dur_s: [2.0, 12.0]       # 持续时间 U[a,b]
+    extra_drop: [0.05, 0.30] # 在原有GE基础上附加丢包
+
+delay:  # 报文净时延（秒）
+  lognormal_mu: [1.0, 1.5]     # 对数正态目标均值（近似）范围
+  lognormal_sigma: [0.25, 0.45]
+  clip_max: [3.0, 6.0]
+
+clock:
+  enable: true
+  offset_s: 5.0                 # 或 [3.0, 7.0]
+  drift_ppm: 100.0              # 或 [-150, 150]
+
+logging:
+  print_params: true
+  export_episode_params: true
+  export_link_samples: false      # 看你需不需要
+  export_ar1_samples: true        # 新增，可选
+
+  clock_dbg_print: true
+  clock_dbg_per_step_max: 6
+  export_link_samples: true
+  link_samples_path: "./ais_link_samples.csv"
+
+scheduler:  # 发报调度（近似Class A/B）
+  base_period_s: 2.5
+  jitter_frac: 0.1
+  sog_mps_breaks: [0.0, 1.03, 2.57, 7.20, 11.83]   # m/s
+  sog_period_s:   [10.0, 6.0, 3.0, 2.0]
+  drop_prob_on_idle: 0.0
+  idle_thr_mps: 0.0
+
+queue:   # 到达队列
+  ttl_s: [20.0, 40.0]      # 报文存活时限（防爆仓）
+  max_inflight: [512, 2048]
+
+obs:     # 观测构建
+  slot_K: 16
+  slot_ttl_s: [30.0, 60.0]
+  age_cap_s: [3.0, 6.0]        # 观测中 age 的截断上限
+  miss_mask: true
+
+noise:   # 报文字段劣化（非对抗）
+  position_m: [0.5, 5.0]       # 高斯 std（米）
+  sog_mps: [0.05, 0.30]        # 高斯 std（m/s）
+  cog_deg: [0.5, 2.0]          # 高斯 std（度）
+  regional_bias:
+    enable: false
+    rects:                      # 在这些区域内附加固定偏置
+      - [[-300,300], [-150,150], [2.0, 5.0], [0.1, 0.3]]  # [x_rng,y_rng, pos_bias_m_rng, sog_bias_mps_rng]
+
+field_errors:  # 字段缺失/错误（概率）
+  mmsi_conflict_prob: 0.0      # 先保持0（后续C阶段开启）
+  type_missing_prob: [0.0, 0.05]
+  draft_missing_prob: [0.0, 0.10]
+  sog_zero_stick_prob: [0.0, 0.05]   # SOG粘连为0的概率
+
+logging:
+  print_params: true
+  export_episode_params: true   # 导出每集采样到的参数（CSV/JSON）
+  export_reorder_samples: true            # 导出乱序样本 CSV
+  reorder_samples_path: ais_metrics_reorder.csv  # 可选：指定文件名
+
+reorder:
+  enable: true          # 是否启用乱序仿真
+  prob: 0.05            # 每条报文被“卡”一次的概率（增加大时延）
+  extra_delay_s: [5.0, 20.0]   # 额外的大时延区间 U[5,20] 秒
+
+gps_bias:
+  enable: true
+  # 每条船的静态偏置幅度范围（m），在 [-pos_bias_max, +pos_bias_max] 里均匀抽
+  pos_bias_max_m: 5.0
+  # 每条船误差漂移速度的范围（m/s），在 [-drift_max, +drift_max] 里均匀抽
+  # 例如 0.02 m/s ≈ 1 分钟漂移 1.2 m
+  drift_max_mps: 0.02

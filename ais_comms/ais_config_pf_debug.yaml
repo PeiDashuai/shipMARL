@@ -1,0 +1,77 @@
+# === AIS domain randomization config (debug: enable delay+loss) ===
+seed_base: 2025
+
+episode:
+  sampling: default
+
+channel:
+  ge:
+    # 让链路偶尔进坏态，坏态下高概率丢包
+    p_g2b: [0.00, 0.02]
+    p_b2g: [0.50, 0.90]
+    drop_bad: [0.05, 0.20]
+
+
+  burst:
+    # 先用轻度 burst，便于观察
+    enable: true
+    prob: 0.01
+    dur_s: [1.0, 3.0]
+    extra_drop: [0.00, 0.10]
+
+delay:
+  # 对数正态延迟（秒）：中位数约 exp(mu)
+  lognormal_mu:    [0.30, 0.8]   # 典型会到 1~3s 量级（取决于你实现的 mu 定义）
+  lognormal_sigma: [0.30, 0.8]
+  clip_max:        [6.0, 12.0]
+
+clock:
+  enable: false
+  offset_s: 20.0
+  drift_ppm: 200.0
+
+scheduler:
+  base_period_s: 1.67
+  jitter_frac: 0.3
+  sog_mps_breaks: [0.0, 1.03, 2.57, 7.20, 11.83, 15.0]
+  sog_period_s:   [6.0, 4.0, 2.0, 1.0, 0.5]
+  drop_prob_on_idle: 0.0
+  idle_thr_mps: 0.0
+
+queue:
+  ttl_s: [30.0, 60.0]
+  max_inflight: [2048, 4096]
+
+obs:
+  slot_K: 16
+  slot_ttl_s: [30.0, 60.0]
+  age_cap_s:  [8.0, 15.0]
+  miss_mask: true
+
+noise:
+  position_m: [0.2, 0.4]
+  sog_mps:    [0.1, 0.2]
+  cog_deg:    [0.1, 0.2]
+  regional_bias:
+    enable: false
+    rects: []
+
+reorder:
+  enable: false
+  prob: 0.3
+  extra_delay_s: 0.3
+
+gps_bias:
+  enable: false
+  pos_bias_max_m: 0.0
+  drift_max_mps: 0.0
+
+logging:
+  print_params: true
+  export_episode_params: true
+  export_link_samples: true
+  link_samples_path: "./ais_link_samples.csv"
+  export_reorder_samples: true
+  reorder_samples_path: "ais_metrics_reorder.csv"
+  clock_dbg_print: true
+  clock_dbg_per_step_max: 8

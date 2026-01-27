@@ -1,0 +1,73 @@
+seed_base: 2025
+
+episode:
+  sampling: default
+
+channel:
+  ge:
+    # 永远处于 good 态、不丢包
+    p_g2b: [0.0, 0.0]
+    p_b2g: [1.0, 1.0]
+    drop_bad: [0.0, 0.0]
+
+  burst:
+    enable: true        # 结构不变
+    prob: 0.0           # 概率为 0 → 不会触发
+    dur_s: [0.0, 0.0]
+    extra_drop: [0.0, 0.0]
+
+delay:
+  enable: true          # 结构不变
+  mu: [0.0, 0.0]
+  sigma: [0.0, 0.0]
+  clip: [0.0, 0.0]
+
+clock:
+  enable: true
+  offset_s: 0.0
+  drift_ppm: 0.0
+
+scheduler:
+  # 这里你可以改为和 dt 一致，比如 0.5，或者保持原值 1.67（但无抖动）
+  base_period_s: 0.1
+  jitter_frac: 0.0
+  break_prob: 0.0
+  break_dur_s: [0.0, 0.0]
+
+queue:
+  ttl_s: [30.0, 60.0]
+  max_inflight: [2048, 4096]
+
+obs:
+  slot_K: 16
+  slot_ttl_s: [30.0, 60.0]
+  age_cap_s:  [8.0, 15.0]
+  miss_mask: true
+
+noise:
+  position_m: [0.0, 0.0]
+  sog_mps:    [0.0, 0.0]
+  cog_deg:    [0.0, 0.0]
+  regional_bias:
+    enable: false
+    rects: []
+
+reorder:
+  enable: false
+  prob: 0.3
+  extra_delay_s: 0.3
+
+gps_bias:
+  enable: false
+  pos_bias_max_m: 0.0
+  drift_max_mps: 0.0
+
+logging:
+  print_params: true
+  export_episode_params: true
+  export_link_samples: true
+  link_samples_path: "./ais_link_samples.csv"
+  export_reorder_samples: true
+  reorder_samples_path: "ais_metrics_reorder.csv"
+  clock_dbg_print: true
+  clock_dbg_per_step_max: 8

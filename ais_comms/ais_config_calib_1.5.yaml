@@ -1,0 +1,88 @@
+# === AIS domain randomization config ===
+seed_base: 2025
+
+episode:
+  # 每个 episode 采样一次；可选“固定/随机/分布”
+  sampling: default   # default | heavy | custom
+
+channel:
+  ge:
+    p_g2b: [0.02, 0.18]       # 更容易进入坏态
+    p_b2g: [0.01, 0.24]       # 更难恢复
+    drop_bad: [0.81, 1.00]    # 坏态下基本都丢
+  burst:
+    enable: true
+    prob: 0.045
+    dur_s: [1.0, 19.0]
+    extra_drop: [0.07, 0.48]
+
+delay:
+  # 平均延迟压到 ~0.2–0.4 s
+  lognormal_mu: [0.15, 0.45]
+  lognormal_sigma: [0.025, 0.175]
+  clip_max: [0.375, 1.1250]
+
+clock:
+  enable: true
+  offset_s: 7.5               # 或 [3.0, 7.0]
+  drift_ppm: 150.0              # 或 [-150, 150]
+
+logging:
+  print_params: true
+  export_episode_params: true
+  export_link_samples: false      # 看你需不需要
+  export_ar1_samples: true        # 新增，可选
+
+  clock_dbg_print: true
+  clock_dbg_per_step_max: 6
+  export_link_samples: true
+  link_samples_path: "./ais_link_samples.csv"
+
+scheduler:
+  base_period_s: 2.08          # 从 3.5 再略微压一点
+  jitter_frac: 0.375
+  sog_mps_breaks: [0.0, 1.03, 2.57, 7.20, 11.83, 15.0]
+  sog_period_s:   [20.0, 12.0, 6.0, 3.0, 1.0]   # 最高速档 ~1s
+  drop_prob_on_idle: 0.0
+  idle_thr_mps: 0.0
+
+
+queue:   # 到达队列
+  ttl_s: [10.0, 50.0]      # 报文存活时限（防爆仓）
+  max_inflight: [256, 3072]
+
+obs:     # 观测构建
+  slot_K: 16
+  slot_ttl_s: [30.0, 60.0]
+  age_cap_s: [3.0, 6.0]        # 观测中 age 的截断上限
+  miss_mask: true
+
+noise:
+  position_m: [8.0, 18.0]
+  sog_mps: [0.8, 1.5] 
+  cog_deg: [35.0, 55.0] 
+  regional_bias:
+    enable: false              # 标定阶段先关掉区域系统偏置
+    rects: []
+
+field_errors:  # 字段缺失/错误（概率）
+  mmsi_conflict_prob: 0.0      # 先保持0（后续C阶段开启）
+  type_missing_prob: [0.0, 0.075]
+  draft_missing_prob: [0.0, 0.150]
+  sog_zero_stick_prob: [0.0, 0.075]   # SOG粘连为0的概率
+
+logging:
+  print_params: true
+  export_episode_params: true   # 导出每集采样到的参数（CSV/JSON）
+  export_reorder_samples: true            # 导出乱序样本 CSV
+  reorder_samples_path: ais_metrics_reorder.csv  # 可选：指定文件名
+
+reorder:
+  enable: false
+  prob: 0.0
+  extra_delay_s: [0.0, 0.0]
+
+gps_bias:
+  enable: true
+  pos_bias_max_m: 15.0      # 每条船一个静态随机偏置（±10m）
+  drift_max_mps: 0.015       # 漂移最大约 0.01 m/s（≈ 0.6 m/min）
