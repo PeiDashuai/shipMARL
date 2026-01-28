@@ -19,3 +19,6 @@ venv/
 # Temp files
 *.log
 *.tmp
+
+# Test artifacts
+*.jsonl
