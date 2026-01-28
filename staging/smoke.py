@@ -1,12 +1,9 @@
 from __future__ import annotations
 
 import argparse
-import os
 import uuid
 from pathlib import Path
 from typing import Any, Dict
-
-from staging.recorder import StagingIdentity, StageRecorder
 
 
 def _extract_episode_uid(infos: Any) -> str:
@@ -72,11 +69,18 @@ def _run_one_episode(env) -> None:
 
         obs, rewards, terms, truncs, infos = env.step(action_dict)
 
+        # Check for episode termination (either __all__ or all agents done)
         done_all = False
         if isinstance(terms, dict) and bool(terms.get("__all__", False)):
             done_all = True
         if isinstance(truncs, dict) and bool(truncs.get("__all__", False)):
             done_all = True
+        if not done_all and agents:
+            # Check if all agents are terminated or truncated
+            done_all = all(
+                bool(terms.get(a, False)) or bool(truncs.get(a, False))
+                for a in agents
+            )
         if done_all:
             break
 
@@ -86,32 +90,23 @@ def smoke(out_dir: str, mode: str, ais_cfg_path: str | None, max_episodes: int =
     _ensure_out_dir_clean(out_dir)
 
     run_uuid = uuid.uuid4().hex
-    ident = StagingIdentity(
-        run_uuid=run_uuid,
-        mode=mode,
-        out_dir=out_dir,
-        worker_index=0,
-        vector_index=0,
-    )
-    recorder = StageRecorder(ident)
 
-    # IMPORTANT: we do NOT call recorder.emit_* here.
-    # The env must write stage3/4 through this recorder (Phase-1 contract).
+    # Let env create and manage its own staging recorder
     from miniship.envs.miniship_ais_comms_env import MiniShipAISCommsEnv
 
     cfg: Dict[str, Any] = {
         "N": 2,
         "dt": 0.5,
+        "T_max": 50.0,  # Short timeout for smoke test (100 steps max)
         "mode": mode,
         "out_dir": out_dir,
         "run_uuid": run_uuid,
         "worker_index": 0,
         "vector_index": 0,
         "ais_cfg_path": ais_cfg_path,
-        # preferred injection hook:
-        "stage_recorder": recorder,
-        # some legacy code might look for this:
-        "staging_recorder": recorder,
+        "staging_enable": True,
+        "staging_record_steps": True,
+        "staging_record_pf": True,
     }
 
     env = MiniShipAISCommsEnv(cfg)
@@ -123,17 +118,30 @@ def smoke(out_dir: str, mode: str, ais_cfg_path: str | None, max_episodes: int =
             env.close()
         except Exception:
             pass
-        recorder.close()
 
-    # strict output existence checks (Phase-1 acceptance)
-    if not recorder.stage3_path.exists() or recorder.stage3_path.stat().st_size == 0:
-        raise RuntimeError(f"[smoke] stage3 shard missing/empty: {recorder.stage3_path}")
-    if not recorder.stage4_path.exists() or recorder.stage4_path.stat().st_size == 0:
-        raise RuntimeError(f"[smoke] stage4 shard missing/empty: {recorder.stage4_path}")
+    # Check output existence (Phase-1 acceptance)
+    from pathlib import Path
+    stage3_dir = Path(out_dir) / "stage3" / mode
+    stage4_dir = Path(out_dir) / "stage4" / mode
+
+    stage3_files = list(stage3_dir.glob("episodes.*.jsonl"))
+    stage4_files = list(stage4_dir.glob("events.*.jsonl"))
+
+    if not stage3_files:
+        raise RuntimeError(f"[smoke] no stage3 shards found in: {stage3_dir}")
+    if not stage4_files:
+        raise RuntimeError(f"[smoke] no stage4 shards found in: {stage4_dir}")
+
+    for fp in stage3_files:
+        if fp.stat().st_size == 0:
+            raise RuntimeError(f"[smoke] stage3 shard empty: {fp}")
+    for fp in stage4_files:
+        if fp.stat().st_size == 0:
+            raise RuntimeError(f"[smoke] stage4 shard empty: {fp}")
 
     print("[smoke] OK")
-    print(f"  stage3: {recorder.stage3_path}")
-    print(f"  stage4: {recorder.stage4_path}")
+    print(f"  stage3: {stage3_files[0]}")
+    print(f"  stage4: {stage4_files[0]}")
 
 
 def main() -> int:
