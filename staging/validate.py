@@ -95,6 +95,9 @@ def validate_out_dir(out_dir: str, mode: str, verbose: bool = False) -> Dict[str
         "pf_estimates_records": 0,
         "episode_end_records": 0,
         "shard_header_records": 0,
+        # New: count embedded data in step records
+        "steps_with_comm_stats": 0,
+        "steps_with_pf_estimates": 0,
     }
     s3_uid_counts: Dict[str, int] = {}
 
@@ -124,6 +127,11 @@ def validate_out_dir(out_dir: str, mode: str, verbose: bool = False) -> Dict[str
                 s3_stats["episode_records"] += 1
             elif rec_type == "step":
                 s3_stats["step_records"] += 1
+                # Count embedded data in step records
+                if rec.get("comm_stats"):
+                    s3_stats["steps_with_comm_stats"] += 1
+                if rec.get("pf_estimates"):
+                    s3_stats["steps_with_pf_estimates"] += 1
             elif rec_type == "comm_stats":
                 s3_stats["comm_stats_records"] += 1
             elif rec_type == "pf_estimates":
@@ -191,6 +199,8 @@ def validate_out_dir(out_dir: str, mode: str, verbose: bool = False) -> Dict[str
         "stage3_step_records": s3_stats["step_records"],
         "stage3_comm_stats_records": s3_stats["comm_stats_records"],
         "stage3_pf_estimates_records": s3_stats["pf_estimates_records"],
+        "stage3_steps_with_comm_stats": s3_stats["steps_with_comm_stats"],
+        "stage3_steps_with_pf_estimates": s3_stats["steps_with_pf_estimates"],
         "stage3_episode_end_records": s3_stats["episode_end_records"],
         "stage4_event_records": s4_stats["event_records"],
     }
