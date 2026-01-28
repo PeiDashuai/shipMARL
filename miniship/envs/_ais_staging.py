@@ -309,6 +309,15 @@ def build_rl_data_dict(
     c_time: float,
     risk: float,
     guard_triggered: bool = False,
+    # Lagrangian dual variables (for policy analysis)
+    lambda_near: float = 0.0,
+    lambda_rule: float = 0.0,
+    lambda_coll: float = 0.0,
+    lambda_time: float = 0.0,
+    dual_version: int = 0,
+    # Guard controller details
+    guard_margin: float = 0.0,
+    guard_action_override: bool = False,
 ) -> Dict[str, Any]:
     """Build RL data dictionary for recording."""
     return {
@@ -326,6 +335,15 @@ def build_rl_data_dict(
         "c_time": c_time,
         "risk": risk,
         "guard_triggered": guard_triggered,
+        # Lagrangian state (enables analyzing constraint-policy interaction)
+        "lambda_near": lambda_near,
+        "lambda_rule": lambda_rule,
+        "lambda_coll": lambda_coll,
+        "lambda_time": lambda_time,
+        "dual_version": dual_version,
+        # Guard details (enables analyzing safety override patterns)
+        "guard_margin": guard_margin,
+        "guard_action_override": guard_action_override,
     }
 
 

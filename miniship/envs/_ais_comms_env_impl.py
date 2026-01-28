@@ -34,11 +34,17 @@ from __future__ import annotations
 import math
 from typing import Any, Dict, List, Optional, Tuple
 
+import random
+import time
+
 from ais_comms.ais_comms import AISCommsSim
 from ais_comms.datatypes import AgentId, ShipId, TrueState
 from ais_comms.track_manager_pf import AISTrackManagerPF
 
 from miniship.envs._ais_identity import EpisodeIdAllocator, EpisodeIdentity, RunIdentity
+
+# Schema version for data format tracking (increment on breaking changes)
+STAGING_SCHEMA_VERSION = "2.0.0"
 from miniship.envs._ais_staging import (
     StagingSink,
     build_ship_state_dict,
@@ -221,13 +227,9 @@ class MiniShipAISCommsEnv:
             except Exception:
                 hashes["ais_cfg_sha256"] = "unknown"
 
-        # PF config hash (from track manager if available)
+        # PF config hash (based on full PF config)
+        pf_cfg = self._get_pf_config()
         try:
-            pf_cfg = {
-                "num_particles": getattr(self._track_mgr, "N", 256),
-                "process_noise": getattr(self._track_mgr, "Q_diag", None),
-                "measurement_noise": getattr(self._track_mgr, "R_diag", None),
-            }
             import json
             pf_str = json.dumps(pf_cfg, sort_keys=True, default=str)
             hashes["pf_cfg_sha256"] = hashlib.sha256(pf_str.encode()).hexdigest()[:16]
@@ -235,6 +237,42 @@ class MiniShipAISCommsEnv:
             hashes["pf_cfg_sha256"] = "unknown"
 
         return hashes
+
+    def _get_pf_config(self) -> Dict[str, Any]:
+        """
+        Extract complete PF configuration for reproducibility.
+        This is the 'configuration contract' for the particle filter.
+        """
+        tm = self._track_mgr
+        return {
+            # Algorithm params
+            "num_particles": int(getattr(tm, "num_particles", getattr(tm, "N", 256))),
+            "resample_threshold_ratio": float(getattr(tm, "resample_threshold_ratio", 0.5)),
+            "pf_seed_base": int(getattr(tm, "pf_seed_base", 2025)),
+
+            # Process noise (motion model uncertainty)
+            "process_std_a": float(getattr(tm, "process_std_a", 0.5)),
+            "process_std_yaw_deg": float(getattr(tm, "process_std_yaw_deg", 10.0)),
+
+            # Measurement noise (observation uncertainty)
+            "meas_std_pos": float(getattr(tm, "meas_std_pos", 8.0)),
+            "meas_std_sog": float(getattr(tm, "meas_std_sog", 0.2)),
+            "meas_std_cog_deg": float(getattr(tm, "meas_std_cog_deg", 8.0)),
+
+            # Relock/gating params
+            "soft_relock_dist": float(getattr(tm, "soft_relock_dist", 20.0)),
+            "hard_relock_dist": float(getattr(tm, "hard_relock_dist", 40.0)),
+            "soft_relock_beta": float(getattr(tm, "soft_relock_beta", 0.3)),
+
+            # Preproc params
+            "preproc_window_sec": float(getattr(tm, "preproc_window_sec", 60.0)),
+            "preproc_max_buffer": int(getattr(tm, "preproc_max_buffer", 256)),
+            "preproc_max_pos_jump": float(getattr(tm, "preproc_max_pos_jump", 80.0)),
+            "preproc_max_cog_jump_deg": float(getattr(tm, "preproc_max_cog_jump_deg", 90.0)),
+
+            # Track management
+            "max_age": float(getattr(tm, "max_age", 20.0)),
+        }
 
     def _build_env_config(self) -> Dict[str, Any]:
         """Extract environment configuration for recording."""
@@ -327,8 +365,16 @@ class MiniShipAISCommsEnv:
         actions: Dict[str, Any],
         rewards: Dict[str, float],
         infos: Dict[str, Any],
+        lagrangian_state: Optional[Dict[str, Any]] = None,
     ) -> List[Dict[str, Any]]:
         """Build RL data records for current step."""
+        # Get lambda values from lagrangian state
+        if lagrangian_state is None:
+            lagrangian_state = self._get_lagrangian_state()
+        lambdas = lagrangian_state.get("lambdas", {})
+        dual_version = lagrangian_state.get("dual_version", 0)
+        guard_state = lagrangian_state.get("guard", {})
+
         results = []
         for agent_id in sorted(self._int_agents):
             info = infos.get(agent_id, {})
@@ -341,6 +387,11 @@ class MiniShipAISCommsEnv:
                 action_raw = list(action)
             else:
                 action_raw = [float(action)]
+
+            # Extract guard details from info
+            guard_triggered = bool(info.get("guard_trig_step_mean", 0.0) > 0.5)
+            guard_margin = float(info.get("guard_margin", info.get("safety_margin", 0.0)))
+            guard_override = bool(info.get("guard_action_override", info.get("action_overridden", False)))
 
             results.append(build_rl_data_dict(
                 agent_id=agent_id,
@@ -356,7 +407,16 @@ class MiniShipAISCommsEnv:
                 c_coll=float(info.get("c_coll", 0.0)),
                 c_time=float(info.get("c_time", 0.0)),
                 risk=float(info.get("risk", 0.0)),
-                guard_triggered=bool(info.get("guard_trig_step_mean", 0.0) > 0.5),
+                guard_triggered=guard_triggered,
+                # Lagrangian dual variables
+                lambda_near=float(lambdas.get("near", 0.0)),
+                lambda_rule=float(lambdas.get("rule", 0.0)),
+                lambda_coll=float(lambdas.get("coll", 0.0)),
+                lambda_time=float(lambdas.get("time", 0.0)),
+                dual_version=int(dual_version),
+                # Guard controller details
+                guard_margin=guard_margin,
+                guard_action_override=guard_override,
             ))
         return results
 
@@ -386,6 +446,104 @@ class MiniShipAISCommsEnv:
             # Clock drift effect
             "age_delay_gap_mean": float(raw.get("age_delay_gap_avg", 0.0)),
         }
+
+    def _get_lagrangian_state(self) -> Dict[str, Any]:
+        """
+        Extract current Lagrangian dual variables and guard state.
+        This enables analysis of how constraints affect policy behavior.
+        """
+        state: Dict[str, Any] = {
+            "dual_version": 0,
+            "lambdas": {"near": 0.0, "rule": 0.0, "coll": 0.0, "time": 0.0},
+            "running_c": {},
+            "guard": {"enabled": False},
+        }
+
+        # Try to get dual manager from core env chain
+        core = self._core
+        dual_mgr = None
+        guard_ctrl = None
+
+        # Traverse wrapper chain to find DualManager and GuardController
+        for _ in range(10):  # Max depth
+            if hasattr(core, "dual_mgr") and core.dual_mgr is not None:
+                dual_mgr = core.dual_mgr
+            if hasattr(core, "core") and hasattr(core.core, "guard_ctrl"):
+                guard_ctrl = getattr(core.core, "guard_ctrl", None)
+            if hasattr(core, "_dual_version"):
+                state["dual_version"] = int(getattr(core, "_dual_version", 0))
+
+            # Move to inner env
+            if hasattr(core, "env"):
+                core = core.env
+            elif hasattr(core, "core"):
+                core = core.core
+            else:
+                break
+
+        # Extract lambda values from dual manager
+        if dual_mgr is not None:
+            try:
+                if hasattr(dual_mgr, "get_lambdas") and callable(dual_mgr.get_lambdas):
+                    lam = dual_mgr.get_lambdas() or {}
+                elif hasattr(dual_mgr, "lambdas"):
+                    lam = getattr(dual_mgr, "lambdas", {}) or {}
+                elif hasattr(dual_mgr, "lam"):
+                    lam = getattr(dual_mgr, "lam", {}) or {}
+                else:
+                    lam = {}
+                state["lambdas"] = {k: float(v) for k, v in lam.items()}
+            except Exception:
+                pass
+
+            # Extract running cost EMA
+            try:
+                if hasattr(dual_mgr, "get_running_c") and callable(dual_mgr.get_running_c):
+                    rc = dual_mgr.get_running_c() or {}
+                elif hasattr(dual_mgr, "running_c"):
+                    rc = getattr(dual_mgr, "running_c", {}) or {}
+                elif hasattr(dual_mgr, "c_ema"):
+                    rc = getattr(dual_mgr, "c_ema", {}) or {}
+                else:
+                    rc = {}
+                state["running_c"] = {k: float(v) for k, v in rc.items()}
+            except Exception:
+                pass
+
+        # Extract guard controller state
+        if guard_ctrl is not None:
+            try:
+                state["guard"] = {
+                    "enabled": True,
+                    "threshold": float(getattr(guard_ctrl, "threshold", getattr(guard_ctrl, "thr", 0.0))),
+                    "margin": float(getattr(guard_ctrl, "margin", 0.0)),
+                }
+            except Exception:
+                state["guard"] = {"enabled": True}
+
+        return state
+
+    def _get_per_ship_comm_stats(self) -> Dict[int, Dict[str, Any]]:
+        """
+        Get per-ship communication statistics for diagnostic analysis.
+        Enables identifying which ship/link has problems.
+        """
+        per_ship: Dict[int, Dict[str, Any]] = {}
+
+        try:
+            # Try to get per-ship metrics from AIS
+            if hasattr(self._ais, "get_per_ship_metrics"):
+                raw = self._ais.get_per_ship_metrics()
+                for sid, metrics in raw.items():
+                    per_ship[int(sid)] = self._clean_comm_stats(metrics)
+            elif hasattr(self._ais, "per_ship_stats"):
+                raw = getattr(self._ais, "per_ship_stats", {})
+                for sid, metrics in raw.items():
+                    per_ship[int(sid)] = self._clean_comm_stats(metrics)
+        except Exception:
+            pass
+
+        return per_ship
 
     def _infer_term_reason(self, infos: Dict[str, Any]) -> str:
         """Infer termination reason from infos."""
@@ -459,16 +617,26 @@ class MiniShipAISCommsEnv:
         comm_final_raw = self._ais.metrics_snapshot()
         comm_stats = self._clean_comm_stats(comm_final_raw)
 
+        # ---- Per-ship comm stats (for diagnostics) ----
+        per_ship_comm_final = self._get_per_ship_comm_stats() if self._record_per_ship_comm else None
+
+        # ---- Final Lagrangian state ----
+        lagrangian_final = self._get_lagrangian_state()
+
         # ---- Timing ----
         duration = t_end - self._t0
 
         return {
+            # Schema version for compatibility checking
+            "schema_version": STAGING_SCHEMA_VERSION,
+
             # Timing
             "t0": self._t0,
             "t_end": t_end,
             "duration": duration,
             "total_steps": self._step_idx,
             "dt": float(self.cfg.get("dt", 0.5)),
+            "seed": getattr(self, "_episode_seed", None),  # For reproducibility
 
             # Return sums
             "return_sum_total": return_sum_total,
@@ -486,11 +654,20 @@ class MiniShipAISCommsEnv:
 
             # Comm stats (episode-level)
             "comm_stats": comm_stats,
+            "per_ship_comm": per_ship_comm_final,  # Per-ship diagnostics (if enabled)
+
+            # Final Lagrangian state (for constraint analysis)
+            "lagrangian_final": lagrangian_final,
         }
 
     # ---------------- Reset with comprehensive staging ----------------
 
     def reset(self, seed: Optional[int] = None, options: Optional[Dict[str, Any]] = None):
+        # Generate reproducible seed if None (critical for reproducibility)
+        if seed is None:
+            seed = int(time.time_ns() % (2**31)) ^ random.randint(0, 2**31 - 1)
+        self._episode_seed = seed  # Save for recording
+
         obs, infos = self._core.reset(seed=seed, options=options)
 
         # episode identity (Phase 2)
@@ -511,6 +688,7 @@ class MiniShipAISCommsEnv:
         self._ep_reward_sum = {aid: 0.0 for aid in self._int_agents}
         self._ep_cost_sum = {"near": 0.0, "rule": 0.0, "coll": 0.0, "time": 0.0}
         self._ep_pf_errors = []
+        self._ep_lagrangian_states = []  # Track lambda evolution
 
         # reset AIS and PF
         self._ais.reset(ships=ship_ids, t0=t0, agent_map=self._agent_of_ship)
@@ -530,14 +708,21 @@ class MiniShipAISCommsEnv:
             # Get complete AIS parameters
             ais_params = self._ais.get_episode_params()
 
-            # Build env config with t0, dt, and config hashes
+            # Build env config with t0, dt, seed, and config hashes
             env_config = self._build_env_config()
-            env_config["seed"] = seed
+            env_config["seed"] = self._episode_seed  # Always record actual seed used
             env_config["t0"] = t0  # Time axis anchor
-            env_config.update(self._compute_config_hashes())  # git_commit, ais_cfg_sha256, pf_cfg_sha256
+            env_config["schema_version"] = STAGING_SCHEMA_VERSION  # Version tracking
+            env_config.update(self._compute_config_hashes())
 
             # Build ship init states
             ship_init_states = self._build_ship_init_states(true_states)
+
+            # Get complete PF config (configuration contract)
+            pf_config = self._get_pf_config()
+
+            # Get initial Lagrangian state
+            lagrangian_init = self._get_lagrangian_state()
 
             # Emit comprehensive episode init
             self._staging.emit_stage3_episode_init(
@@ -549,6 +734,8 @@ class MiniShipAISCommsEnv:
                     "run_uuid": self._run.run_uuid,
                     "worker_index": self._run.worker_index,
                     "vector_index": self._run.vector_index,
+                    "pf_config": pf_config,  # Full PF configuration contract
+                    "lagrangian_init": lagrangian_init,  # Initial dual variables
                 },
             )
 
@@ -594,16 +781,25 @@ class MiniShipAISCommsEnv:
 
         # ---- Comprehensive staging: step record ----
         pf_estimates = None
+        lagrangian_state = None
         if self._staging is not None and self._record_step_data:
+            # Get current Lagrangian state (lambdas, guard, etc.)
+            lagrangian_state = self._get_lagrangian_state()
+
             # Build ship states
             ship_states = self._build_step_ship_states(true_states, infos)
 
-            # Build RL data
-            rl_data = self._build_step_rl_data(actions, rews, infos)
+            # Build RL data (with Lagrangian state)
+            rl_data = self._build_step_rl_data(actions, rews, infos, lagrangian_state)
 
             # Get comm stats (canonical fields only)
             comm_stats_raw = self._ais.metrics_snapshot()
             comm_stats = self._clean_comm_stats(comm_stats_raw)
+
+            # Get per-ship comm stats (optional, for diagnostics)
+            per_ship_comm = None
+            if self._record_per_ship_comm:
+                per_ship_comm = self._get_per_ship_comm_stats()
 
             # Get PF estimates (optional, can be expensive)
             if self._record_pf_estimates:
@@ -618,6 +814,9 @@ class MiniShipAISCommsEnv:
                 rl_data=rl_data,
                 comm_stats=comm_stats,
                 pf_estimates=pf_estimates,
+                extra={
+                    "per_ship_comm": per_ship_comm,
+                } if per_ship_comm else None,
             )
 
         # Accumulate PF errors for episode summary
