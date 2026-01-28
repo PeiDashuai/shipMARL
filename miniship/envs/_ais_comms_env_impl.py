@@ -100,11 +100,13 @@ class MiniShipAISCommsEnv:
         # Control what data is recorded (can disable for performance)
         self._record_step_data = bool(self.cfg.get("staging_record_steps", True))
         self._record_pf_estimates = bool(self.cfg.get("staging_record_pf", True))
+        self._record_per_ship_comm = bool(self.cfg.get("staging_record_per_ship_comm", False))
 
         # episode identity allocator
         self._ep_alloc = EpisodeIdAllocator(self._run)
         self._ep: Optional[EpisodeIdentity] = None
         self._step_idx: int = 0
+        self._t0: float = 0.0  # Episode start time
 
         # mappings
         self._int_agents: List[AgentId] = []
@@ -114,6 +116,11 @@ class MiniShipAISCommsEnv:
         # Cache for step recording
         self._last_actions: Dict[str, Any] = {}
         self._last_true_states: Dict[ShipId, TrueState] = {}
+
+        # Episode-level accumulators for summary stats
+        self._ep_reward_sum: Dict[str, float] = {}
+        self._ep_cost_sum: Dict[str, float] = {}  # near, rule, coll, time
+        self._ep_pf_errors: List[Dict[str, float]] = []  # per-step PF errors
 
     # ---------------- PettingZoo parallel API delegation ----------------
 
@@ -186,6 +193,48 @@ class MiniShipAISCommsEnv:
             yaw = float(math.atan2(vy, vx)) if (abs(vx) + abs(vy)) > 1e-12 else float(psi)
             out[sid] = TrueState(ship_id=sid, t=t, x=x, y=y, vx=vx, vy=vy, yaw_east_ccw_rad=yaw)
         return t, out
+
+    def _compute_config_hashes(self) -> Dict[str, str]:
+        """Compute SHA256 hashes of config files for reproducibility."""
+        import hashlib
+        import subprocess
+
+        hashes = {}
+
+        # Git commit hash
+        try:
+            result = subprocess.run(
+                ["git", "rev-parse", "HEAD"],
+                capture_output=True, text=True, timeout=5
+            )
+            if result.returncode == 0:
+                hashes["git_commit"] = result.stdout.strip()[:12]
+        except Exception:
+            hashes["git_commit"] = "unknown"
+
+        # AIS config file hash
+        ais_cfg_path = self.cfg.get("ais_cfg_path", "")
+        if ais_cfg_path:
+            try:
+                with open(ais_cfg_path, "rb") as f:
+                    hashes["ais_cfg_sha256"] = hashlib.sha256(f.read()).hexdigest()[:16]
+            except Exception:
+                hashes["ais_cfg_sha256"] = "unknown"
+
+        # PF config hash (from track manager if available)
+        try:
+            pf_cfg = {
+                "num_particles": getattr(self._track_mgr, "N", 256),
+                "process_noise": getattr(self._track_mgr, "Q_diag", None),
+                "measurement_noise": getattr(self._track_mgr, "R_diag", None),
+            }
+            import json
+            pf_str = json.dumps(pf_cfg, sort_keys=True, default=str)
+            hashes["pf_cfg_sha256"] = hashlib.sha256(pf_str.encode()).hexdigest()[:16]
+        except Exception:
+            hashes["pf_cfg_sha256"] = "unknown"
+
+        return hashes
 
     def _build_env_config(self) -> Dict[str, Any]:
         """Extract environment configuration for recording."""
@@ -311,6 +360,33 @@ class MiniShipAISCommsEnv:
             ))
         return results
 
+    def _clean_comm_stats(self, raw: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Clean comm_stats to use canonical field names only.
+        Removes redundant aliases to prevent semantic drift.
+        """
+        # Canonical fields (single authority, no aliases)
+        return {
+            # Packet rates
+            "ppr": float(raw.get("ppr", 0.0)),        # Packet Pass Rate
+            "pdr": float(raw.get("pdr", 0.0)),        # Packet Delivery Rate
+            "drop_rate": float(raw.get("drop_rate", 0.0)),
+            # Delay (seconds)
+            "delay_mean": float(raw.get("delay_avg", raw.get("delay_mean_s", 0.0))),
+            "delay_p95": float(raw.get("delay_p95", raw.get("delay_p95_s", 0.0))),
+            "delay_max": float(raw.get("delay_max", raw.get("delay_max_s", 0.0))),
+            # Age (seconds)
+            "age_mean": float(raw.get("age_avg", raw.get("age_mean_s", 0.0))),
+            "age_p95": float(raw.get("age_p95", raw.get("age_p95_s", 0.0))),
+            "age_max": float(raw.get("age_max", raw.get("age_max_s", 0.0))),
+            # Channel quality
+            "bad_occupancy": float(raw.get("bad_occupancy", 0.0)),
+            "reorder_count": int(raw.get("reorder_count", 0)),
+            "reorder_rate": float(raw.get("reorder_rate", 0.0)),
+            # Clock drift effect
+            "age_delay_gap_mean": float(raw.get("age_delay_gap_avg", 0.0)),
+        }
+
     def _infer_term_reason(self, infos: Dict[str, Any]) -> str:
         """Infer termination reason from infos."""
         for agent_id, info in infos.items():
@@ -331,6 +407,87 @@ class MiniShipAISCommsEnv:
                 return "timeout"
         return "unknown"
 
+    def _build_episode_summary(self, t_end: float, infos: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Build comprehensive episode summary statistics.
+
+        Includes:
+          - Return sums (per-agent and global)
+          - Cost sums (near, rule, coll, time)
+          - PF error statistics (mean/p95/max for pos/vel/heading)
+          - Episode-level comm stats
+        """
+        import numpy as np
+
+        # ---- Return sums ----
+        return_sum_per_agent = dict(self._ep_reward_sum)
+        return_sum_total = sum(return_sum_per_agent.values())
+
+        # ---- Cost sums ----
+        cost_sums = dict(self._ep_cost_sum)
+
+        # ---- PF error statistics ----
+        pf_stats = {}
+        if self._ep_pf_errors:
+            pos_errors = [e["pos_error_mean"] for e in self._ep_pf_errors]
+            vel_errors = [e["vel_error_mean"] for e in self._ep_pf_errors]
+            heading_errors = [e["heading_error_mean"] for e in self._ep_pf_errors]
+
+            # Position error stats
+            pf_stats["pos_error_mean"] = float(np.mean(pos_errors))
+            pf_stats["pos_error_p95"] = float(np.percentile(pos_errors, 95)) if len(pos_errors) >= 2 else float(np.max(pos_errors))
+            pf_stats["pos_error_max"] = float(np.max(pos_errors))
+
+            # Velocity error stats
+            pf_stats["vel_error_mean"] = float(np.mean(vel_errors))
+            pf_stats["vel_error_p95"] = float(np.percentile(vel_errors, 95)) if len(vel_errors) >= 2 else float(np.max(vel_errors))
+            pf_stats["vel_error_max"] = float(np.max(vel_errors))
+
+            # Heading error stats (already in radians)
+            pf_stats["heading_error_mean"] = float(np.mean(heading_errors))
+            pf_stats["heading_error_p95"] = float(np.percentile(heading_errors, 95)) if len(heading_errors) >= 2 else float(np.max(heading_errors))
+            pf_stats["heading_error_max"] = float(np.max(heading_errors))
+        else:
+            # No PF data recorded
+            pf_stats = {
+                "pos_error_mean": 0.0, "pos_error_p95": 0.0, "pos_error_max": 0.0,
+                "vel_error_mean": 0.0, "vel_error_p95": 0.0, "vel_error_max": 0.0,
+                "heading_error_mean": 0.0, "heading_error_p95": 0.0, "heading_error_max": 0.0,
+            }
+
+        # ---- Episode-level comm stats (canonical names) ----
+        comm_final_raw = self._ais.metrics_snapshot()
+        comm_stats = self._clean_comm_stats(comm_final_raw)
+
+        # ---- Timing ----
+        duration = t_end - self._t0
+
+        return {
+            # Timing
+            "t0": self._t0,
+            "t_end": t_end,
+            "duration": duration,
+            "total_steps": self._step_idx,
+            "dt": float(self.cfg.get("dt", 0.5)),
+
+            # Return sums
+            "return_sum_total": return_sum_total,
+            "return_sum_per_agent": return_sum_per_agent,
+
+            # Cost sums
+            "cost_sum_near": cost_sums.get("near", 0.0),
+            "cost_sum_rule": cost_sums.get("rule", 0.0),
+            "cost_sum_coll": cost_sums.get("coll", 0.0),
+            "cost_sum_time": cost_sums.get("time", 0.0),
+            "cost_sum_total": sum(cost_sums.values()),
+
+            # PF tracking error statistics
+            "pf_error": pf_stats,
+
+            # Comm stats (episode-level)
+            "comm_stats": comm_stats,
+        }
+
     # ---------------- Reset with comprehensive staging ----------------
 
     def reset(self, seed: Optional[int] = None, options: Optional[Dict[str, Any]] = None):
@@ -346,8 +503,14 @@ class MiniShipAISCommsEnv:
 
         # init true states
         t0, true_states = self._get_true_states()
+        self._t0 = t0  # Save for episode_init t0
         ship_ids = sorted(true_states.keys())
         self._last_true_states = true_states
+
+        # Reset episode accumulators
+        self._ep_reward_sum = {aid: 0.0 for aid in self._int_agents}
+        self._ep_cost_sum = {"near": 0.0, "rule": 0.0, "coll": 0.0, "time": 0.0}
+        self._ep_pf_errors = []
 
         # reset AIS and PF
         self._ais.reset(ships=ship_ids, t0=t0, agent_map=self._agent_of_ship)
@@ -367,9 +530,11 @@ class MiniShipAISCommsEnv:
             # Get complete AIS parameters
             ais_params = self._ais.get_episode_params()
 
-            # Build env config
+            # Build env config with t0, dt, and config hashes
             env_config = self._build_env_config()
             env_config["seed"] = seed
+            env_config["t0"] = t0  # Time axis anchor
+            env_config.update(self._compute_config_hashes())  # git_commit, ais_cfg_sha256, pf_cfg_sha256
 
             # Build ship init states
             ship_init_states = self._build_ship_init_states(true_states)
@@ -418,7 +583,17 @@ class MiniShipAISCommsEnv:
         ready = self._ais.step(t=t, true_states=true_states)
         self._track_mgr.ingest(t=t, ready=ready, true_states=true_states)
 
+        # ---- Accumulate episode stats ----
+        for agent_id in self._int_agents:
+            self._ep_reward_sum[agent_id] = self._ep_reward_sum.get(agent_id, 0.0) + float(rews.get(agent_id, 0.0))
+            info = infos.get(agent_id, {})
+            self._ep_cost_sum["near"] += float(info.get("c_near", 0.0))
+            self._ep_cost_sum["rule"] += float(info.get("c_rule", 0.0))
+            self._ep_cost_sum["coll"] += float(info.get("c_coll", 0.0))
+            self._ep_cost_sum["time"] += float(info.get("c_time", 0.0))
+
         # ---- Comprehensive staging: step record ----
+        pf_estimates = None
         if self._staging is not None and self._record_step_data:
             # Build ship states
             ship_states = self._build_step_ship_states(true_states, infos)
@@ -426,11 +601,11 @@ class MiniShipAISCommsEnv:
             # Build RL data
             rl_data = self._build_step_rl_data(actions, rews, infos)
 
-            # Get comm stats
-            comm_stats = self._ais.metrics_snapshot()
+            # Get comm stats (canonical fields only)
+            comm_stats_raw = self._ais.metrics_snapshot()
+            comm_stats = self._clean_comm_stats(comm_stats_raw)
 
             # Get PF estimates (optional, can be expensive)
-            pf_estimates = None
             if self._record_pf_estimates:
                 pf_estimates = self._track_mgr.get_pf_estimates_for_staging(t, true_states)
 
@@ -444,6 +619,15 @@ class MiniShipAISCommsEnv:
                 comm_stats=comm_stats,
                 pf_estimates=pf_estimates,
             )
+
+        # Accumulate PF errors for episode summary
+        if pf_estimates:
+            step_pf_err = {
+                "pos_error_mean": sum(p.get("pos_error", 0.0) for p in pf_estimates) / len(pf_estimates),
+                "vel_error_mean": sum(p.get("vel_error", 0.0) for p in pf_estimates) / len(pf_estimates),
+                "heading_error_mean": sum(abs(p.get("heading_error", 0.0)) for p in pf_estimates) / len(pf_estimates),
+            }
+            self._ep_pf_errors.append(step_pf_err)
 
         self._step_idx += 1
         self._last_true_states = true_states
@@ -460,11 +644,8 @@ class MiniShipAISCommsEnv:
         if done_all and self._staging is not None:
             term_reason = self._infer_term_reason(infos)
 
-            # Build final stats
-            final_stats = {
-                "ais_metrics_final": self._ais.metrics_snapshot(),
-                "total_steps": self._step_idx,
-            }
+            # Build comprehensive final stats
+            final_stats = self._build_episode_summary(t, infos)
 
             # Build per-agent stats
             per_agent_stats = []
