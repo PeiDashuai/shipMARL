@@ -92,6 +92,8 @@ class AISCommsSim:
 
         # ship_id -> agent_id
         self.agent_of_ship: Dict[ShipId, AgentId] = {}
+        # agent_id -> ship_id (reverse mapping for distance-based loss)
+        self._ship_of_agent: Dict[AgentId, ShipId] = {}
 
         # —— Delay 模型（lognormal + clip）默认值，reset 时会被 _apply_episode_params 覆盖
         self.mu_ln = float(np.log(1.2))  # 对数均值（≈1.2s）
@@ -182,7 +184,14 @@ class AISCommsSim:
         self._ge_params = dict(
             p_g2b=0.01, p_b2g=0.2, drop_bad=True,
             burst_enable=False, burst_prob=0.0, burst_dur_s=0.0, burst_extra_drop=0.0,
+            dist_enable=False, dist_ref_m=18520.0, dist_max_m=55560.0, dist_loss_exp=2.0,
         )
+
+        # Distance-based loss configuration (cached for easy access)
+        self.dist_enable = False
+        self.dist_ref_m = 18520.0   # 10 nm in meters
+        self.dist_max_m = 55560.0   # 30 nm in meters
+        self.dist_loss_exp = 2.0
 
         # “时间推进”参考点
         self._last_tick_t: float = 0.0
@@ -317,6 +326,12 @@ class AISCommsSim:
                 t0=float(getattr(self, "_gps_bias_t0", 0.0)),
                 bias_xy=gps_bias_xy,
                 drift_xy=gps_drift_xy,
+            ),
+            distance=dict(
+                enable=bool(getattr(self, "dist_enable", False)),
+                ref_m=float(getattr(self, "dist_ref_m", 18520.0)),
+                max_m=float(getattr(self, "dist_max_m", 55560.0)),
+                loss_exp=float(getattr(self, "dist_loss_exp", 2.0)),
             ),
         )
 
@@ -698,6 +713,10 @@ class AISCommsSim:
     def reset(self, ships: List[ShipId], t0: Ts, agent_map: Dict[ShipId, AgentId]):
         """每个 episode 开始调用。"""
         self.agent_of_ship = dict(agent_map)
+        # Reverse mapping: agent_id -> ship_id (for distance-based loss)
+        self._ship_of_agent: Dict[AgentId, ShipId] = {
+            str(aid): int(sid) for sid, aid in agent_map.items()
+        }
         # Stage3 required caches (avoid placeholder outputs)
         # Use stable ship_id order for deterministic stage3 outputs.
         ship_ids_sorted = [int(s) for s in sorted(list(ships))]
@@ -953,6 +972,13 @@ class AISCommsSim:
                         t0=float(getattr(self, "_gps_bias_t0", 0.0)),
                         bias_xy=gps_bias_xy,
                         drift_xy=gps_drift_xy,
+                    ),
+                    # distance-based loss
+                    distance=dict(
+                        enable=bool(getattr(self, "dist_enable", False)),
+                        ref_m=float(getattr(self, "dist_ref_m", 18520.0)),
+                        max_m=float(getattr(self, "dist_max_m", 55560.0)),
+                        loss_exp=float(getattr(self, "dist_loss_exp", 2.0)),
                     ),
                 )
 
@@ -1429,6 +1455,12 @@ class AISCommsSim:
     # ---------------- episode params ----------------
     def _apply_episode_params(self, ep):
         # 保存 GE 参数（新链路建 channel 时复用）
+        # Distance-based loss parameters (with defaults for backward compatibility)
+        self.dist_enable = bool(getattr(ep, "dist_enable", False))
+        self.dist_ref_m = float(getattr(ep, "dist_ref_m", 18520.0))
+        self.dist_max_m = float(getattr(ep, "dist_max_m", 55560.0))
+        self.dist_loss_exp = float(getattr(ep, "dist_loss_exp", 2.0))
+
         self._ge_params = dict(
             p_g2b=float(ep.ge_p_g2b),
             p_b2g=float(ep.ge_p_b2g),
@@ -1437,6 +1469,10 @@ class AISCommsSim:
             burst_prob=float(ep.burst_prob),
             burst_dur_s=float(ep.burst_dur_s),
             burst_extra_drop=float(ep.burst_extra_drop),
+            dist_enable=self.dist_enable,
+            dist_ref_m=self.dist_ref_m,
+            dist_max_m=self.dist_max_m,
+            dist_loss_exp=self.dist_loss_exp,
         )
 
         # delay
@@ -1874,11 +1910,24 @@ class AISCommsSim:
                     link_key = (int(sid), str(rx))
                     ch = self._get_link_channel(link_key)
 
-                    # ======= 关键修复：本步只“判定”，不推进状态 =======
+                    # ======= 计算发送端与接收端的距离（用于距离衰减） =======
+                    distance_m = None
+                    if self.dist_enable:
+                        # 找到接收端 agent 对应的 ship_id
+                        rx_sid = self._ship_of_agent.get(rx, None)
+                        if rx_sid is not None and rx_sid in true_states:
+                            rx_st = true_states[rx_sid]
+                            # 计算距离 (tx 是 sid, rx 是 rx_sid)
+                            dx = x_true_w - float(rx_st.x)
+                            dy = y_true_w - float(rx_st.y)
+                            distance_m = math.sqrt(dx * dx + dy * dy)
+                    # ==================================================
+
+                    # ======= 关键修复：本步只"判定"，不推进状态 =======
                     passed = None
                     if hasattr(ch, "pass_now"):
                         try:
-                            passed = bool(ch.pass_now())
+                            passed = bool(ch.pass_now(distance_m=distance_m))
                         except Exception:
                             passed = None
                     if passed is None:

@@ -1,18 +1,31 @@
 # ais_comms/ge_channel.py
 from __future__ import annotations
 import numpy as np
+import math
 
 
 class GEChannel:
     """
-    Gilbert–Elliott 两态信道（时间一致版本）
+    Gilbert–Elliott 两态信道（时间一致版本）+ 可选距离衰减
 
     设计原则（非常重要）：
     ----------------------
-    1) 状态机 **只在 tick(dt) 时推进**，表示“时间流逝”
+    1) 状态机 **只在 tick(dt) 时推进**，表示"时间流逝"
     2) pass_now() **只判断当前状态是否通过**，不改变状态
     3) burst_dur_s 语义 = 秒，不随报文密度变化
     4) 每条链路一个 GEChannel 实例（由上层保证）
+
+    距离衰减模型（可选）：
+    ----------------------
+    - dist_enable: 是否启用距离衰减
+    - dist_ref_m: 参考距离（米），低于此距离无额外丢包
+    - dist_max_m: 最大通信距离（米），超出则 100% 丢包
+    - dist_loss_exp: 衰减指数，控制丢包率曲线陡峭程度
+      p_dist_loss = ((d - dist_ref_m) / (dist_max_m - dist_ref_m))^dist_loss_exp
+
+    典型 AIS 参数：
+    - Class A: dist_ref_m=18520 (10nm), dist_max_m=55560 (30nm), dist_loss_exp=2.0
+    - Class B: dist_ref_m=9260 (5nm), dist_max_m=18520 (10nm), dist_loss_exp=2.0
 
     若上层误用 step_pass()，本实现仍兼容，但会警告语义不推荐。
     """
@@ -50,6 +63,16 @@ class GEChannel:
         # 最近一次 tick 的 dt（仅调试）
         self._last_dt = 0.0
 
+        # ===== 距离衰减参数 =====
+        self.dist_enable = False
+        self.dist_ref_m = 18520.0       # 10 nautical miles in meters
+        self.dist_max_m = 55560.0       # 30 nautical miles in meters
+        self.dist_loss_exp = 2.0        # 衰减指数（2.0 = 平方衰减）
+
+        # 距离统计
+        self._dist_drop_count = 0
+        self._dist_total_count = 0
+
     # ------------------------------------------------------------
     # 参数设置
     # ------------------------------------------------------------
@@ -63,6 +86,10 @@ class GEChannel:
         burst_prob: float = 0.0,
         burst_dur_s: float = 0.0,
         burst_extra_drop: float = 0.0,
+        dist_enable: bool = False,
+        dist_ref_m: float = 18520.0,
+        dist_max_m: float = 55560.0,
+        dist_loss_exp: float = 2.0,
         step_dt: float | None = None,  # 为兼容旧接口，忽略
     ):
         self.p_g2b = float(p_g2b)
@@ -74,6 +101,11 @@ class GEChannel:
         self.burst_dur_s = float(burst_dur_s)
         self.burst_extra_drop = float(burst_extra_drop)
 
+        self.dist_enable = bool(dist_enable)
+        self.dist_ref_m = float(dist_ref_m)
+        self.dist_max_m = float(dist_max_m)
+        self.dist_loss_exp = float(dist_loss_exp)
+
     # ------------------------------------------------------------
     # 状态复位
     # ------------------------------------------------------------
@@ -83,6 +115,8 @@ class GEChannel:
         self._total_time = 0.0
         self._burst_left_s = 0.0
         self._last_dt = 0.0
+        self._dist_drop_count = 0
+        self._dist_total_count = 0
 
     # ------------------------------------------------------------
     # 时间推进（核心）
@@ -129,11 +163,35 @@ class GEChannel:
     # ------------------------------------------------------------
     # 当前是否通过（不推进状态）
     # ------------------------------------------------------------
-    def pass_now(self) -> bool:
+    def pass_now(self, distance_m: float | None = None) -> bool:
         """
         判断当前时刻该链路是否通过。
         ❗ 不推进状态 ❗
+
+        Args:
+            distance_m: 发送端与接收端之间的距离（米）。
+                        若启用距离衰减且提供此参数，将额外计算距离丢包。
+
+        Returns:
+            True 表示该报文通过信道，False 表示被丢弃。
         """
+        # 1. 先检查距离衰减（如果启用）
+        if self.dist_enable and distance_m is not None:
+            self._dist_total_count += 1
+            d = float(distance_m)
+            if d >= self.dist_max_m:
+                # 超出最大范围，100% 丢包
+                self._dist_drop_count += 1
+                return False
+            elif d > self.dist_ref_m:
+                # 在参考距离和最大距离之间，按指数衰减丢包
+                ratio = (d - self.dist_ref_m) / max(1.0, self.dist_max_m - self.dist_ref_m)
+                p_loss = math.pow(ratio, self.dist_loss_exp)
+                if self.rng.random() < p_loss:
+                    self._dist_drop_count += 1
+                    return False
+
+        # 2. GE 信道状态判断
         if self.state == "G":
             return True
 
@@ -164,3 +222,21 @@ class GEChannel:
         if self._total_time <= 0.0:
             return 0.0
         return float(self._bad_time / self._total_time)
+
+    def dist_loss_rate(self) -> float:
+        """距离衰减导致的丢包率"""
+        if self._dist_total_count <= 0:
+            return 0.0
+        return float(self._dist_drop_count / self._dist_total_count)
+
+    def dist_stats(self) -> dict:
+        """距离衰减统计"""
+        return {
+            "enable": self.dist_enable,
+            "ref_m": self.dist_ref_m,
+            "max_m": self.dist_max_m,
+            "loss_exp": self.dist_loss_exp,
+            "drop_count": self._dist_drop_count,
+            "total_count": self._dist_total_count,
+            "loss_rate": self.dist_loss_rate(),
+        }
