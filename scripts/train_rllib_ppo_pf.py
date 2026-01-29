@@ -45,7 +45,7 @@ from ray.rllib.policy.sample_batch import SampleBatch
 from miniship.wrappers.rllib_env import register_miniship_env
 from miniship.models.gnn_lstm_ac import register_miniship_gnn_lstm_model
 
-from staging.recorder import StagingRecorder, StagingConfig, StagingIdentity
+from staging.recorder import StageRecorder, StagingIdentity
 
 # ===================== Debug env flags (kept) =====================
 DEBUG_PF = bool(int(os.getenv("PF_DEBUG", "0")))
@@ -339,7 +339,7 @@ class MiniShipCallbacks(DefaultCallbacks):
     - Reward shaping with Lagrangian (near/rule)
     - Dual sync
     - Episode terminal stats (succ/coll/tout)
-    - STAGING: emit stage3_ctx + stage4_ep through StagingRecorder (no direct stage writes)
+    - STAGING: emit stage3/stage4 records through StageRecorder (no direct stage writes)
     """
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
@@ -372,8 +372,8 @@ class MiniShipCallbacks(DefaultCallbacks):
         self.dual_freeze = False  # manual freeze flag (env_cfg can set)
 
         # STAGING recorder cache: key=(mode, wid, v) -> recorder
-        self._staging_recorders: Dict[tuple, StagingRecorder] = {}
-        self._staging_cfg: Optional[StagingConfig] = None
+        self._staging_recorders: Dict[tuple, StageRecorder] = {}
+        self._staging_out_dir: Optional[str] = None
         self._staging_strict: bool = True
 
         # init latch from env_cfg
@@ -475,17 +475,11 @@ class MiniShipCallbacks(DefaultCallbacks):
         st = env_cfg.get("staging", None)
         if isinstance(st, dict):
             out_dir = str(st.get("out_dir", env_cfg.get("out_dir", "")) or "")
-            strict = bool(st.get("strict", True))
-            self._staging_cfg = StagingConfig(
-                out_dir=os.path.abspath(out_dir) if out_dir else os.path.abspath(env_cfg.get("out_dir", ".")),
-                strict=strict,
-                stage3_schema=str(st.get("stage3_schema", "stage3_ctx.v1")),
-                stage4_schema=str(st.get("stage4_schema", "stage4_ep.v1")),
-            )
-            self._staging_strict = strict
+            self._staging_out_dir = os.path.abspath(out_dir) if out_dir else os.path.abspath(env_cfg.get("out_dir", "."))
+            self._staging_strict = bool(st.get("strict", True))
         else:
             # default: still require staging in Phase1-2
-            self._staging_cfg = StagingConfig(out_dir=os.path.abspath(env_cfg.get("out_dir", ".")), strict=True)
+            self._staging_out_dir = os.path.abspath(env_cfg.get("out_dir", "."))
             self._staging_strict = True
 
         self._cfg_initialized = True
@@ -493,18 +487,25 @@ class MiniShipCallbacks(DefaultCallbacks):
         print(
             "[shipMARL][CallbackCfg] init_ok "
             f"use_lagrangian={self.use_lagrangian} lam={self.lam} "
-            f"staging_out={self._staging_cfg.out_dir if self._staging_cfg else None} strict={self._staging_strict}"
+            f"staging_out={self._staging_out_dir} strict={self._staging_strict}"
         )
 
-    def _get_recorder(self, *, env_cfg: dict, worker_index: int, vector_index: int) -> StagingRecorder:
-        if self._staging_cfg is None:
-            # should have been set in _maybe_init_from_env_cfg; fallback strict
-            out_dir = os.path.abspath(env_cfg.get("out_dir", "."))
-            self._staging_cfg = StagingConfig(out_dir=out_dir, strict=True)
+    @staticmethod
+    def _infer_mode(env_cfg: dict) -> str:
+        """Infer mode (train/eval) from env config."""
+        mode = env_cfg.get("mode", "train")
+        if isinstance(mode, str) and mode.strip():
+            return mode.strip()
+        return "train"
+
+    def _get_recorder(self, *, env_cfg: dict, worker_index: int, vector_index: int) -> StageRecorder:
+        if self._staging_out_dir is None:
+            # should have been set in _maybe_init_from_env_cfg; fallback
+            self._staging_out_dir = os.path.abspath(env_cfg.get("out_dir", "."))
             self._staging_strict = True
 
         run_uuid = str(env_cfg.get("run_uuid", "") or "")
-        mode = StagingRecorder.infer_mode_from_env_cfg(env_cfg)
+        mode = self._infer_mode(env_cfg)
 
         key = (mode, int(worker_index), int(vector_index))
         rec = self._staging_recorders.get(key, None)
@@ -517,11 +518,11 @@ class MiniShipCallbacks(DefaultCallbacks):
         ident = StagingIdentity(
             run_uuid=run_uuid,
             mode=mode,
-            out_dir=os.path.abspath(env_cfg.get("out_dir", ".")),
+            out_dir=self._staging_out_dir,
             worker_index=int(worker_index),
             vector_index=int(vector_index),
         )
-        rec = StagingRecorder(self._staging_cfg, ident)
+        rec = StageRecorder(ident)
         self._staging_recorders[key] = rec
         return rec
 
@@ -563,29 +564,42 @@ class MiniShipCallbacks(DefaultCallbacks):
         ep_params, ep_params_src = _extract_episode_params_best_effort(real_env)
         tm_snap = _extract_trackmgr_cfg_best_effort(real_env)
 
-        payload = {
+        # Build env_config for stage3 recording
+        stage3_env_config = {
+            "N": env_cfg.get("N", 2),
+            "dt": env_cfg.get("dt", 0.5),
+            "T_max": env_cfg.get("T_max", 100.0),
+            "ais_cfg_path": str(env_cfg.get("ais_cfg_path", "")),
+            "ais_cfg_sha256": str(env_cfg.get("ais_cfg_sha256", "")),
+        }
+
+        # Build ais_params for stage3 recording
+        stage3_ais_params = {
+            "episode_params": ep_params,
+            "episode_params_src": ep_params_src,
+        }
+
+        # Extra metadata
+        extra = {
             "started_utc": _utc_now_iso(),
             "env_chain": env_chain,
-            "ais_episode_params": ep_params,
-            "ais_episode_params_src": ep_params_src,
             "track_mgr_snapshot": tm_snap,
-            "ais_cfg": {
-                "ais_cfg_path": str(env_cfg.get("ais_cfg_path", "")),
-                "ais_cfg_sha256": str(env_cfg.get("ais_cfg_sha256", "")),
-            },
             "identity": {
                 "run_uuid": str(env_cfg.get("run_uuid", "")),
-                "mode": StagingRecorder.infer_mode_from_env_cfg(env_cfg),
+                "mode": self._infer_mode(env_cfg),
                 "out_dir": str(env_cfg.get("out_dir", "")),
                 "worker_index": wid,
                 "vector_index": vid,
             },
         }
 
-        rec.emit_stage3_ctx(
+        rec.emit_stage3_episode_init(
             episode_uid=episode_uid,
             episode_idx=int(getattr(episode, "episode_id", -1) or -1),
-            payload=payload,
+            env_config=stage3_env_config,
+            ais_params=stage3_ais_params,
+            ship_init_states=[],  # Will be populated by env if needed
+            extra=extra,
         )
 
     def on_postprocess_trajectory(
@@ -845,10 +859,21 @@ class MiniShipCallbacks(DefaultCallbacks):
             },
         }
 
-        rec.emit_stage4_ep(
+        # Determine termination reason
+        term_reason = "unknown"
+        if episode.custom_metrics.get("coll_ep_bin", 0.0) > 0:
+            term_reason = "collision"
+        elif episode.custom_metrics.get("succ_ep_bin", 0.0) > 0:
+            term_reason = "success"
+        elif episode.custom_metrics.get("tout_ep_bin", 0.0) > 0:
+            term_reason = "timeout"
+
+        rec.emit_stage4_episode_end(
             episode_uid=episode_uid,
             episode_idx=int(getattr(episode, "episode_id", -1) or -1),
-            payload=payload,
+            t_end=float(getattr(episode, "length", 0) or 0) * float(env_cfg.get("dt", 0.5)),
+            term_reason=term_reason,
+            stats=payload,
         )
 
     def on_train_result(self, *, algorithm, result, **kwargs):
