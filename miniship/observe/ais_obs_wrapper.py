@@ -57,6 +57,7 @@ class AISObsWrapper(ParallelEnv):
         self.K_neighbors = int(getattr(env, "K_neighbors", cfg.get("numNeighbors", 4)))
         self.spawn_mode = str(getattr(env, "spawn_mode", cfg.get("spawn_mode", "circle_center")))
         self.spawn_area = float(getattr(env, "spawn_area", cfg.get("spawn_area", 240.0)))
+        self.spawn_len = float(getattr(env, "spawn_len", cfg.get("spawn_len", 180.0)))
         self.v_max = float(getattr(env, "v_max", cfg.get("v_max", 3.0)))
 
         # ---------- AIS 参数（更接近真实） ----------
@@ -288,6 +289,7 @@ class AISObsWrapper(ParallelEnv):
             self.K_neighbors,
             self.spawn_mode,
             self.spawn_area,
+            self.spawn_len,
             self.v_max,
         )
 
