@@ -1108,7 +1108,8 @@ def main():
         # Checkpoint
         if i % args.checkpoint_freq == 0:
             ckpt = algo.save(os.path.join(args.out_dir, "checkpoints"))
-            print(f"[shipMARL] Checkpoint saved: {ckpt}")
+            ckpt_path = getattr(getattr(ckpt, "checkpoint", None), "path", str(ckpt))
+            print(f"[shipMARL] Checkpoint saved: {ckpt_path}")
 
         # Best model
         if ep_reward > best_reward:
@@ -1117,7 +1118,8 @@ def main():
 
     # Final save
     final_ckpt = algo.save(os.path.join(args.out_dir, "final"))
-    print(f"[shipMARL] Training complete. Final checkpoint: {final_ckpt}")
+    final_path = getattr(getattr(final_ckpt, "checkpoint", None), "path", str(final_ckpt))
+    print(f"[shipMARL] Training complete. Final checkpoint: {final_path}")
 
     algo.stop()
     ray.shutdown()
