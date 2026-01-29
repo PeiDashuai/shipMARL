@@ -945,6 +945,7 @@ def build_ppo_config(args, run_uuid: str) -> PPOConfig:
         "use_lagrangian": args.use_lagrangian,
         "use_guard": args.use_guard,
         "use_ais_obs": args.use_ais_obs,
+        "use_pf_ais_env": args.use_ais_obs,  # Enable AIS+PF env when use_ais_obs is True
         "ais_cfg_path": args.ais_cfg_path,
         "mode": "train",
         "out_dir": args.out_dir,
