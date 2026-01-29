@@ -163,7 +163,13 @@ class GEChannel:
     # ------------------------------------------------------------
     # 当前是否通过（不推进状态）
     # ------------------------------------------------------------
-    def pass_now(self, distance_m: float | None = None) -> bool:
+    def pass_now(
+        self,
+        distance_m: float | None = None,
+        dist_ref_m: float | None = None,
+        dist_max_m: float | None = None,
+        dist_loss_exp: float | None = None,
+    ) -> bool:
         """
         判断当前时刻该链路是否通过。
         ❗ 不推进状态 ❗
@@ -171,22 +177,30 @@ class GEChannel:
         Args:
             distance_m: 发送端与接收端之间的距离（米）。
                         若启用距离衰减且提供此参数，将额外计算距离丢包。
+            dist_ref_m: Override reference distance (for per-class differentiation)
+            dist_max_m: Override max distance (for per-class differentiation)
+            dist_loss_exp: Override loss exponent (for per-class differentiation)
 
         Returns:
             True 表示该报文通过信道，False 表示被丢弃。
         """
+        # Use override params if provided, else use channel defaults
+        ref_m = dist_ref_m if dist_ref_m is not None else self.dist_ref_m
+        max_m = dist_max_m if dist_max_m is not None else self.dist_max_m
+        loss_exp = dist_loss_exp if dist_loss_exp is not None else self.dist_loss_exp
+
         # 1. 先检查距离衰减（如果启用）
         if self.dist_enable and distance_m is not None:
             self._dist_total_count += 1
             d = float(distance_m)
-            if d >= self.dist_max_m:
+            if d >= max_m:
                 # 超出最大范围，100% 丢包
                 self._dist_drop_count += 1
                 return False
-            elif d > self.dist_ref_m:
+            elif d > ref_m:
                 # 在参考距离和最大距离之间，按指数衰减丢包
-                ratio = (d - self.dist_ref_m) / max(1.0, self.dist_max_m - self.dist_ref_m)
-                p_loss = math.pow(ratio, self.dist_loss_exp)
+                ratio = (d - ref_m) / max(1.0, max_m - ref_m)
+                p_loss = math.pow(ratio, loss_exp)
                 if self.rng.random() < p_loss:
                     self._dist_drop_count += 1
                     return False

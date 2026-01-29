@@ -189,11 +189,17 @@ class AISCommsSim:
 
         # Distance-based loss configuration (cached for easy access)
         self.dist_enable = False
-        self.dist_ref_m = 18520.0   # 10 nm in meters
-        self.dist_max_m = 55560.0   # 30 nm in meters
+        self.dist_ref_m = 18520.0   # 10 nm in meters (Class A default)
+        self.dist_max_m = 55560.0   # 30 nm in meters (Class A default)
         self.dist_loss_exp = 2.0
 
-        # “时间推进”参考点
+        # AIS Class A/B configuration
+        # Class B: shorter range (default: 5nm ref, 10nm max vs Class A: 10nm ref, 30nm max)
+        self.class_b_dist_ref_m = 9260.0   # 5 nm in meters
+        self.class_b_dist_max_m = 18520.0  # 10 nm in meters
+        self._ais_ship_classes: Dict[ShipId, str] = {}  # ship_id -> "A" or "B"
+
+        # "时间推进"参考点
         self._last_tick_t: float = 0.0
 
         # ---- Stage3 contexts ----
@@ -332,6 +338,12 @@ class AISCommsSim:
                 ref_m=float(getattr(self, "dist_ref_m", 18520.0)),
                 max_m=float(getattr(self, "dist_max_m", 55560.0)),
                 loss_exp=float(getattr(self, "dist_loss_exp", 2.0)),
+                class_b_ref_m=float(getattr(self, "class_b_dist_ref_m", 9260.0)),
+                class_b_max_m=float(getattr(self, "class_b_dist_max_m", 18520.0)),
+            ),
+            ais_class=dict(
+                class_a_count=sum(1 for c in self._ais_ship_classes.values() if c == "A"),
+                class_b_count=sum(1 for c in self._ais_ship_classes.values() if c == "B"),
             ),
         )
 
@@ -710,13 +722,36 @@ class AISCommsSim:
         self._stage3_episode_idx = int(episode_idx)
 
     # ---------------- lifecycle ----------------
-    def reset(self, ships: List[ShipId], t0: Ts, agent_map: Dict[ShipId, AgentId]):
-        """每个 episode 开始调用。"""
+    def reset(
+        self,
+        ships: List[ShipId],
+        t0: Ts,
+        agent_map: Dict[ShipId, AgentId],
+        ship_classes: Optional[Dict[ShipId, str]] = None,
+    ):
+        """
+        每个 episode 开始调用。
+
+        Args:
+            ships: List of ship IDs
+            t0: Initial time
+            agent_map: Mapping from ship_id to agent_id
+            ship_classes: Optional mapping from ship_id to AIS class ("A" or "B").
+                         If not provided, all ships default to Class A.
+        """
         self.agent_of_ship = dict(agent_map)
         # Reverse mapping: agent_id -> ship_id (for distance-based loss)
         self._ship_of_agent: Dict[AgentId, ShipId] = {
             str(aid): int(sid) for sid, aid in agent_map.items()
         }
+
+        # Store per-ship AIS classes
+        self._ais_ship_classes = {}
+        if ship_classes:
+            for sid, cls in ship_classes.items():
+                cls = str(cls).upper()
+                self._ais_ship_classes[int(sid)] = cls if cls in ("A", "B") else "A"
+
         # Stage3 required caches (avoid placeholder outputs)
         # Use stable ship_id order for deterministic stage3 outputs.
         ship_ids_sorted = [int(s) for s in sorted(list(ships))]
@@ -733,7 +768,8 @@ class AISCommsSim:
         # 队列与调度器复位
         self.arrivals = ArrivalQueue()
         for sid in ships:
-            self.scheduler.reset_ship(sid, t0)
+            ais_class = self._ais_ship_classes.get(int(sid), "A")
+            self.scheduler.reset_ship(sid, t0, ais_class=ais_class)
 
         # 指标复位
         self.reset_metrics()
@@ -979,6 +1015,13 @@ class AISCommsSim:
                         ref_m=float(getattr(self, "dist_ref_m", 18520.0)),
                         max_m=float(getattr(self, "dist_max_m", 55560.0)),
                         loss_exp=float(getattr(self, "dist_loss_exp", 2.0)),
+                        class_b_ref_m=float(getattr(self, "class_b_dist_ref_m", 9260.0)),
+                        class_b_max_m=float(getattr(self, "class_b_dist_max_m", 18520.0)),
+                    ),
+                    # AIS Class distribution
+                    ais_class=dict(
+                        class_a_count=sum(1 for c in self._ais_ship_classes.values() if c == "A"),
+                        class_b_count=sum(1 for c in self._ais_ship_classes.values() if c == "B"),
                     ),
                 )
 
@@ -1461,6 +1504,10 @@ class AISCommsSim:
         self.dist_max_m = float(getattr(ep, "dist_max_m", 55560.0))
         self.dist_loss_exp = float(getattr(ep, "dist_loss_exp", 2.0))
 
+        # Class B distance parameters (shorter range than Class A)
+        self.class_b_dist_ref_m = float(getattr(ep, "class_b_dist_ref_m", 9260.0))
+        self.class_b_dist_max_m = float(getattr(ep, "class_b_dist_max_m", 18520.0))
+
         self._ge_params = dict(
             p_g2b=float(ep.ge_p_g2b),
             p_b2g=float(ep.ge_p_b2g),
@@ -1912,6 +1959,7 @@ class AISCommsSim:
 
                     # ======= 计算发送端与接收端的距离（用于距离衰减） =======
                     distance_m = None
+                    tx_class = self._ais_ship_classes.get(int(sid), "A")
                     if self.dist_enable:
                         # 找到接收端 agent 对应的 ship_id
                         rx_sid = self._ship_of_agent.get(rx, None)
@@ -1921,13 +1969,25 @@ class AISCommsSim:
                             dx = x_true_w - float(rx_st.x)
                             dy = y_true_w - float(rx_st.y)
                             distance_m = math.sqrt(dx * dx + dy * dy)
+
+                    # Get class-specific distance parameters
+                    if tx_class == "B":
+                        dist_ref = self.class_b_dist_ref_m
+                        dist_max = self.class_b_dist_max_m
+                    else:
+                        dist_ref = self.dist_ref_m
+                        dist_max = self.dist_max_m
                     # ==================================================
 
                     # ======= 关键修复：本步只"判定"，不推进状态 =======
                     passed = None
                     if hasattr(ch, "pass_now"):
                         try:
-                            passed = bool(ch.pass_now(distance_m=distance_m))
+                            passed = bool(ch.pass_now(
+                                distance_m=distance_m,
+                                dist_ref_m=dist_ref,
+                                dist_max_m=dist_max,
+                            ))
                         except Exception:
                             passed = None
                     if passed is None:
