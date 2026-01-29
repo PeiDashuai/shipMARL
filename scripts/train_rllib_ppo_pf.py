@@ -577,6 +577,10 @@ class MiniShipCallbacks(DefaultCallbacks):
         episode_uid = _get_env_episode_uid_strict(real_env, strict=False)
         episode.user_data["episode_uid"] = episode_uid  # keep for end
 
+        # Skip staging if episode_uid is empty (env doesn't support it)
+        if not episode_uid:
+            return
+
         ep_params, ep_params_src = _extract_episode_params_best_effort(real_env)
         tm_snap = _extract_trackmgr_cfg_best_effort(real_env)
 
