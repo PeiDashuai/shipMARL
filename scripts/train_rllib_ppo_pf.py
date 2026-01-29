@@ -948,6 +948,7 @@ def build_ppo_config(args, run_uuid: str) -> PPOConfig:
         "N": args.N,
         "dt": args.dt,
         "T_max": args.T_max,
+        "spawn_len": args.spawn_len,
         "use_lagrangian": args.use_lagrangian,
         "use_guard": args.use_guard,
         "use_ais_obs": args.use_ais_obs,
@@ -1031,7 +1032,8 @@ def main():
     # Environment
     parser.add_argument("--N", type=int, default=2, help="Number of ships")
     parser.add_argument("--dt", type=float, default=0.5, help="Simulation timestep")
-    parser.add_argument("--T_max", type=float, default=100.0, help="Max episode time")
+    parser.add_argument("--T_max", type=float, default=180.0, help="Max episode time (180s needed for 160m spawn_len)")
+    parser.add_argument("--spawn-len", type=float, default=160.0, help="Start-to-goal distance (m)")
     parser.add_argument("--use-lagrangian", action="store_true", help="Use Lagrangian reward shaping")
     parser.add_argument("--use-guard", action="store_true", help="Use safety guard")
     parser.add_argument("--use-ais-obs", action="store_true", help="Use AIS observations")
