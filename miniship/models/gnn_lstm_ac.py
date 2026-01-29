@@ -92,10 +92,15 @@ class MiniShipGNNLSTMActorCritic(TorchModelV2, nn.Module):
         TorchModelV2.__init__(self, obs_space, action_space, num_outputs, model_config, name)
         nn.Module.__init__(self)
 
-        custom_cfg: Dict[str, Any] = kwargs.get("custom_model_config", {})
+        # RLlib passes custom_model_config inside model_config, not as a separate kwarg
+        custom_cfg: Dict[str, Any] = model_config.get("custom_model_config", {})
+        if not custom_cfg:
+            # Fallback to kwargs for backward compatibility
+            custom_cfg = kwargs.get("custom_model_config", {})
 
         # 先确定 K / 邻居 / 边 / id 维度（这些我们在 builder 里是固定设计好的）
-        self.num_neighbors: int = int(custom_cfg.get("num_neighbors", 6))
+        # Default num_neighbors=4 matches env default (miniship_core_env.py:135 numNeighbors)
+        self.num_neighbors: int = int(custom_cfg.get("num_neighbors", 4))
         self.neighbor_dim: int = int(custom_cfg.get("neighbor_dim", 11))
         self.edge_dim: int = int(custom_cfg.get("edge_dim", 8))
         self.id_dim: int = int(custom_cfg.get("id_dim", 1))
