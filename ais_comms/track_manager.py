@@ -208,10 +208,12 @@ class AISTrackManager:
 
             out[int(sid)] = TrueState(
                 ship_id=int(sid),
+                t=float(t),
                 x=float(px),
                 y=float(py),
                 vx=float(vx),
                 vy=float(vy),
+                yaw_east_ccw_rad=float(yaw),
             )
 
         # 可选：对没有轨迹的船回退到真值（用于 RL 训练更稳定）

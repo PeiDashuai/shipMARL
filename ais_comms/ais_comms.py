@@ -114,8 +114,13 @@ class AISCommsSim:
         self.noise_pos_m = 15.0
         self.noise_sog_mps = 1.0
         self.noise_cog_rad = math.radians(1.0)
+        self.noise_rot_rads = 0.01  # rot noise std (rad/s), typical AIS rot resolution ~0.01 rad/s
         self.reg_bias_enable = True
         self.reg_bias_rects = []
+
+        # —— Previous yaw tracking for rot computation (per ship)
+        self._prev_yaw: Dict[ShipId, float] = {}
+        self._prev_t: Dict[ShipId, float] = {}
 
         # -------- AR(1) 噪声参数（时间相关 SOG/COG） --------
         self.sog_ar1_rho = float(self.cfg.get("noise_sog_ar1_rho", 0.95))
@@ -300,6 +305,7 @@ class AISCommsSim:
                 pos_m=float(getattr(self, "noise_pos_m", 0.0)),
                 sog_mps=float(getattr(self, "noise_sog_mps", 0.0)),
                 cog_rad=float(getattr(self, "noise_cog_rad", 0.0)),
+                rot_rads=float(getattr(self, "noise_rot_rads", 0.01)),
                 reg_bias_enable=bool(getattr(self, "reg_bias_enable", False)),
             ),
             clock=dict(
@@ -717,6 +723,10 @@ class AISCommsSim:
         self._sog_ar1_state.clear()
         self._cog_ar1_state.clear()
 
+        # Previous yaw tracking for rot computation
+        self._prev_yaw.clear()
+        self._prev_t.clear()
+
         # 采样 episode 参数并应用
         ep_seed = self.base_seed + int(self.rng.integers(1, 10_000_000))
         self._ep_seed = int(ep_seed)  # 可选：存下来便于 debug/复现
@@ -923,6 +933,7 @@ class AISCommsSim:
                         pos_m=float(getattr(self, "noise_pos_m", 0.0)),
                         sog_mps=float(getattr(self, "noise_sog_mps", 0.0)),
                         cog_rad=float(getattr(self, "noise_cog_rad", 0.0)),
+                        rot_rads=float(getattr(self, "noise_rot_rads", 0.01)),
                         reg_bias_enable=bool(getattr(self, "reg_bias_enable", False)),
                     ),
                     # reorder (internal)
@@ -1779,12 +1790,41 @@ class AISCommsSim:
                 except Exception:
                     pass
 
-                # 4) MMSI 与可选冲突
+                # 4) Compute ROT (rate of turn) and nav_status
+                # Try to get rot from TrueState first, otherwise compute from yaw difference
+                rot_true = float(getattr(st, "rot", 0.0))
+                if rot_true == 0.0 and sid in self._prev_yaw and sid in self._prev_t:
+                    # Compute rot from yaw difference: omega = d_yaw / dt
+                    prev_yaw = self._prev_yaw[sid]
+                    prev_t = self._prev_t[sid]
+                    dt_yaw = t - prev_t
+                    if dt_yaw > 1e-6:
+                        # Handle angle wrap-around (-pi, pi]
+                        d_yaw = cog_true - prev_yaw
+                        if d_yaw > math.pi:
+                            d_yaw -= 2 * math.pi
+                        elif d_yaw < -math.pi:
+                            d_yaw += 2 * math.pi
+                        rot_true = d_yaw / dt_yaw
+
+                # Update previous yaw tracking
+                self._prev_yaw[sid] = cog_true
+                self._prev_t[sid] = t
+
+                # Add noise to rot
+                rot_w = rot_true
+                if self.noise_rot_rads > 0.0:
+                    rot_w += float(self.rng.normal(0.0, self.noise_rot_rads))
+
+                # Get nav_status from TrueState (default 0 = underway using engine)
+                nav_status = int(getattr(st, "nav_status", 0))
+
+                # 5) MMSI 与可选冲突
                 true_mmsi = self.mmsi_of_ship.get(sid, 999000000 + int(sid))
                 report_mmsi = self._maybe_conflict_mmsi(true_mmsi, sid)
                 # 1. 生成唯一 ID
                 unique_id = str(uuid.uuid4())[:8]  # 取前8位通常足够且易读
-                # 5) RawTx
+                # 6) RawTx
                 raw = RawTxMsg(
                     msg_id=unique_id,
                     tx_ship=sid,
@@ -1792,6 +1832,8 @@ class AISCommsSim:
                     tx_ts_true=float(t),
                     x=x_w, y=y_w,
                     sog=sog_w, cog=cog_w,
+                    rot=rot_w,
+                    nav_status=nav_status,
                 )
 
                 if os.environ.get("AIS_TRACE_TX_BIAS", "0") == "1":
@@ -1886,6 +1928,8 @@ class AISCommsSim:
                         reported_y=raw.y,
                         reported_sog=raw.sog,
                         reported_cog=raw.cog,
+                        reported_rot=raw.rot,
+                        reported_nav_status=raw.nav_status,
                         reported_ts=reported_ts,
                         arrival_time=at,
                         age=age,

@@ -2637,7 +2637,7 @@ class AISTrackManagerPF:
             vx = v * math.cos(yaw)
             vy = v * math.sin(yaw)
 
-            ts_out = TrueState(ship_id=sid, x=px, y=py, vx=vx, vy=vy)
+            ts_out = TrueState(ship_id=sid, t=t_env, x=px, y=py, vx=vx, vy=vy, yaw_east_ccw_rad=yaw)
             # Attach per-agent AIS uncertainty to the estimate object (best-effort).
             # These fields are READ by obs builder if you pass this object downstream.
             u_stale = 1.0

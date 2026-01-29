@@ -43,8 +43,8 @@ class MiniShipParallelEnv:
             vx, vy = SPEED*(-x)/(n+1e-9), SPEED*(-y)/(n+1e-9)
             sog = float(SPEED)
             cog = float(math.atan2(vy, vx))
-            # TrueState 需为 (sid, x, y, sog, cog) —— 与 AIS 使用一致
-            self.states[sid] = TrueState(sid, x=x, y=y, vx=vx, vy=vy)
+            # TrueState 需为 (sid, t, x, y, vx, vy, yaw_east_ccw_rad) —— 与 AIS 使用一致
+            self.states[sid] = TrueState(ship_id=sid, t=self.t, x=x, y=y, vx=vx, vy=vy, yaw_east_ccw_rad=cog)
             self.vel[sid] = (vx, vy)  # 单独保存速度向量
 
         self.ais.reset(ships=self.ship_ids, t0=self.t, agent_map=self.agent_of_ship)

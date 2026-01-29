@@ -48,6 +48,13 @@ class RawTxMsg:
       - x, y: position (ENU/world coordinates)
       - sog: speed over ground (m/s)
       - cog: course over ground (rad, ENU convention)
+      - rot: rate of turn (rad/s, positive=turning left/CCW, per CTRV model)
+             IMO AIS encodes rot as AIS_ROT = 4.733 * sqrt(|rot_deg_min|) * sign(rot)
+             but here we keep raw rad/s for internal use.
+      - nav_status: navigation status code (0-15 per ITU-R M.1371)
+             0=underway using engine, 1=at anchor, 2=not under command,
+             3=restricted maneuverability, 4=constrained by draught,
+             5=moored, 6=aground, 7=fishing, 8=sailing, 15=undefined
     """
     msg_id: str
     tx_ship: ShipId
@@ -57,6 +64,8 @@ class RawTxMsg:
     y: float
     sog: float
     cog: float  # yaw_east_ccw_rad (ENU, rad)
+    rot: float = 0.0  # rate of turn (rad/s)
+    nav_status: int = 0  # navigation status (0=underway using engine)
     meta: Dict[str, Any] | None = None
 
     # Legacy alias for ship_id
@@ -75,6 +84,10 @@ class RxMsg:
     Received AIS message after channel effects (drop/delay/noise).
 
     reported_* fields are the *received* values (may be noisy).
+
+    Additional fields:
+      - reported_rot: rate of turn (rad/s, may have noise)
+      - reported_nav_status: navigation status code (0-15, passed through)
     """
     msg_id: str
     rx_agent: AgentId
@@ -83,6 +96,8 @@ class RxMsg:
     reported_y: float
     reported_sog: float
     reported_cog: float  # yaw_east_ccw_rad (ENU, rad)
+    reported_rot: float  # rate of turn (rad/s)
+    reported_nav_status: int  # navigation status (0-15)
     reported_ts: Ts
     arrival_time: Ts
     age: float
@@ -111,6 +126,9 @@ class TrueState:
       - x, y, vx, vy are ENU/world coordinates.
       - yaw_east_ccw_rad is atan2(vy, vx) in ENU (East=0, CCW+), unit rad.
       - t is simulation time (seconds).
+      - rot: rate of turn (rad/s), optional, defaults to 0.0 for straight motion.
+             Positive = turning left (CCW), per CTRV model convention.
+      - nav_status: navigation status code (0-15), defaults to 0 (underway using engine).
     """
     ship_id: ShipId
     t: Ts
@@ -119,6 +137,8 @@ class TrueState:
     vx: float
     vy: float
     yaw_east_ccw_rad: float
+    rot: float = 0.0  # rate of turn (rad/s)
+    nav_status: int = 0  # navigation status code
 
     @property
     def yaw_sim_rad(self) -> float:
