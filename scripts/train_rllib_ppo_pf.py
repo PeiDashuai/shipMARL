@@ -997,6 +997,8 @@ def build_ppo_config(args, run_uuid: str) -> PPOConfig:
 
     if args.model == "gnn_lstm":
         # Model is registered in MiniShipCallbacks.__init__ for each worker
+        # Note: Environment uses K_neighbors=4 by default (env_cfg "numNeighbors")
+        # obs_dim = 8 + K*11 + K*8 + 1 = 85 for K=4
         print("[shipMARL] Using GNN-LSTM model")
         config = config.training(
             model={
@@ -1004,7 +1006,7 @@ def build_ppo_config(args, run_uuid: str) -> PPOConfig:
                 "custom_model_config": {
                     "gnn_hidden_size": 128,
                     "lstm_hidden_size": 128,
-                    "num_neighbors": 6,
+                    "num_neighbors": 4,  # Must match env's numNeighbors (default 4)
                     "neighbor_dim": 11,
                     "edge_dim": 8,
                     "id_dim": 1,
