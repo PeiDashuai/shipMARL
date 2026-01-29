@@ -918,10 +918,7 @@ class MiniShipCallbacks(DefaultCallbacks):
 def build_ppo_config(args, run_uuid: str) -> PPOConfig:
     """Build PPO configuration for MiniShip training."""
 
-    # Register environment and model
-    register_miniship_env()
-    register_miniship_gnn_lstm_model()
-
+    # Build env config first (needed for registration)
     env_cfg = {
         "N": args.N,
         "dt": args.dt,
@@ -942,10 +939,14 @@ def build_ppo_config(args, run_uuid: str) -> PPOConfig:
         },
     }
 
+    # Register environment and model
+    env_name, obs_space, act_space = register_miniship_env(env_cfg)
+    register_miniship_gnn_lstm_model()
+
     config = (
         PPOConfig()
         .environment(
-            env="miniship_ais_comms",
+            env=env_name,
             env_config=env_cfg,
         )
         .framework("torch")
