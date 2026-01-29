@@ -948,6 +948,7 @@ def build_ppo_config(args, run_uuid: str) -> PPOConfig:
         .environment(
             env=env_name,
             env_config=env_cfg,
+            disable_env_checking=True,  # Wrapper has custom action_space_sample
         )
         .framework("torch")
         .training(
