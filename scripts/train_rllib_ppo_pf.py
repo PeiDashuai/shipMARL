@@ -1029,7 +1029,7 @@ def main():
     parser.add_argument("--use-lagrangian", action="store_true", help="Use Lagrangian reward shaping")
     parser.add_argument("--use-guard", action="store_true", help="Use safety guard")
     parser.add_argument("--use-ais-obs", action="store_true", help="Use AIS observations")
-    parser.add_argument("--ais-cfg-path", default="ais_comms/ais_config_pf.yaml", help="AIS config path")
+    parser.add_argument("--ais-cfg-path", default="ais_comms/ais_config_pf_perfect.yaml", help="AIS config path")
 
     # Training
     parser.add_argument("--lr", type=float, default=3e-4, help="Learning rate")
