@@ -997,6 +997,14 @@ class AISCommsSim:
         self.age_samples: List[float] = []
         self.age_minus_delay_samples = []
 
+        # --- Per-ship metrics (for diagnostic analysis) ---
+        # tx_ship -> list of delay/age samples
+        self._per_ship_delay: Dict[int, List[float]] = {}
+        self._per_ship_age: Dict[int, List[float]] = {}
+        self._per_ship_rx_count: Dict[int, int] = {}
+        # Last RX info per ship (for PF error attribution)
+        self._last_rx_by_ship: Dict[int, Dict[str, float]] = {}
+
         self._link_samples = []
         self._ar1_samples = []
 
@@ -1177,6 +1185,57 @@ class AISCommsSim:
             "age_max_s": age_max,
         }
         return snap
+
+    def get_per_ship_metrics(self) -> Dict[int, Dict[str, Any]]:
+        """
+        Per-ship communication metrics for diagnostic analysis.
+
+        Enables attributing PF errors to specific ship's communication quality:
+        - Which ship's messages are delayed/dropped
+        - Last RX timing for each ship (for PF error causality)
+
+        Returns:
+            Dict[ship_id, {
+                "rx_count": int,          # Total messages received from this ship
+                "delay_mean": float,      # Mean delay (seconds)
+                "delay_p95": float,       # 95th percentile delay
+                "delay_max": float,
+                "age_mean": float,        # Mean message age
+                "age_p95": float,
+                "age_max": float,
+                "last_rx_delay_s": float, # Most recent delay (for attribution)
+                "last_rx_age_s": float,   # Most recent age
+                "last_rx_report_ts": float,  # Timestamp in last message
+                "last_rx_arrival_ts": float, # When last message arrived
+            }]
+        """
+        import numpy as np
+
+        def _p95(arr) -> float:
+            return float(np.percentile(arr, 95)) if len(arr) >= 2 else (float(max(arr)) if arr else 0.0)
+
+        result = {}
+        for sid in self._ships:
+            delays = self._per_ship_delay.get(sid, [])
+            ages = self._per_ship_age.get(sid, [])
+            last_rx = self._last_rx_by_ship.get(sid, {})
+
+            result[sid] = {
+                "rx_count": self._per_ship_rx_count.get(sid, 0),
+                "delay_mean": float(np.mean(delays)) if delays else 0.0,
+                "delay_p95": _p95(delays),
+                "delay_max": float(max(delays)) if delays else 0.0,
+                "age_mean": float(np.mean(ages)) if ages else 0.0,
+                "age_p95": _p95(ages),
+                "age_max": float(max(ages)) if ages else 0.0,
+                # Last RX info (most recent message from this ship)
+                "last_rx_delay_s": last_rx.get("last_rx_delay_s", 0.0),
+                "last_rx_age_s": last_rx.get("last_rx_age_s", 0.0),
+                "last_rx_report_ts": last_rx.get("last_rx_report_ts", 0.0),
+                "last_rx_arrival_ts": last_rx.get("last_rx_arrival_ts", 0.0),
+            }
+
+        return result
 
     def get_episode_params(self) -> Dict[str, Any]:
         """
@@ -1837,6 +1896,23 @@ class AISCommsSim:
                     self.age_samples.append(age)
                     amd = float(age - net_delay)
                     self.age_minus_delay_samples.append(amd)
+
+                    # Per-ship tracking (for diagnostic analysis)
+                    tx_sid = int(sid)
+                    if tx_sid not in self._per_ship_delay:
+                        self._per_ship_delay[tx_sid] = []
+                        self._per_ship_age[tx_sid] = []
+                        self._per_ship_rx_count[tx_sid] = 0
+                    self._per_ship_delay[tx_sid].append(net_delay)
+                    self._per_ship_age[tx_sid].append(age)
+                    self._per_ship_rx_count[tx_sid] += 1
+                    # Last RX info for this ship (useful for PF error attribution)
+                    self._last_rx_by_ship[tx_sid] = {
+                        "last_rx_delay_s": float(net_delay),
+                        "last_rx_age_s": float(age),
+                        "last_rx_report_ts": float(reported_ts),
+                        "last_rx_arrival_ts": float(at),
+                    }
 
                     if self.cfg.get("logging", {}).get("export_link_samples", False):
                         off, dppm = self.clock_of_ship.get(sid, (0.0, 0.0))

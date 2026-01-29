@@ -41,8 +41,17 @@ class StagingSink:
     rec: StageRecorder
 
     @staticmethod
-    def from_run(run: RunIdentity) -> "StagingSink":
-        """Create StagingSink from env-side RunIdentity."""
+    def from_run(run: RunIdentity, run_metadata: Optional[Dict[str, Any]] = None) -> "StagingSink":
+        """Create StagingSink from env-side RunIdentity.
+
+        Args:
+            run: Environment-side run identity
+            run_metadata: Optional run-level metadata for reproducibility:
+                - train_args: Training script arguments (lr, batch_size, etc.)
+                - ais_cfg_hash: Hash of AIS config file
+                - pf_cfg_hash: Hash of PF config
+                (git info is auto-captured by StageRecorder)
+        """
         srun = StagingRunIdentity(
             run_uuid=run.run_uuid,
             out_dir=run.out_dir,
@@ -50,7 +59,7 @@ class StagingSink:
             worker_index=run.worker_index,
             vector_index=run.vector_index,
         )
-        return StagingSink(run=run, rec=StageRecorder(srun))
+        return StagingSink(run=run, rec=StageRecorder(srun, run_metadata=run_metadata))
 
     def close(self) -> None:
         """Close the underlying recorder."""

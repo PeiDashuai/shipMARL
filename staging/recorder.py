@@ -153,13 +153,24 @@ class StageRecorder:
       - Support episode-level and step-level analysis
     """
 
-    def __init__(self, ident: StagingIdentity):
+    def __init__(self, ident: StagingIdentity, run_metadata: Optional[Dict[str, Any]] = None):
+        """
+        Args:
+            ident: Staging identity (run_uuid, mode, worker, vector)
+            run_metadata: Optional run-level metadata for reproducibility:
+                - git_commit: Git commit hash
+                - git_dirty: Whether working tree has uncommitted changes
+                - train_args: Training script arguments
+                - ais_cfg_hash: Hash of AIS config file
+                - pf_cfg_hash: Hash of PF config
+        """
         if not isinstance(ident, StagingIdentity):
             raise TypeError(f"ident must be StagingIdentity, got {type(ident)}")
         self._validate_identity(ident)
 
         self.ident = ident
         self._pid = os.getpid()
+        self._run_metadata = run_metadata or {}
 
         # Setup directories
         out = Path(ident.out_dir)
@@ -200,16 +211,57 @@ class StageRecorder:
             raise ValueError("ident.vector_index must be >= 0")
 
     def _write_header(self) -> None:
-        """Write shard metadata as first record."""
+        """Write shard metadata as first record with run-level info."""
+        # Compute git info
+        git_info = self._get_git_info()
+
         header = {
             "type": "shard_header",
             "ts_wall": time.time(),
             "pid": self._pid,
             **self.ident.as_dict(),
             "schema_version": "2.0",
+            # Run-level metadata for reproducibility
+            "git_commit": git_info.get("commit", "unknown"),
+            "git_dirty": git_info.get("dirty", False),
+            "git_branch": git_info.get("branch", "unknown"),
+            # User-provided run metadata (train args, config hashes, etc.)
+            **self._run_metadata,
         }
         self._append_jsonl(self._stage3_path, header)
         self._append_jsonl(self._stage4_path, header)
+
+    def _get_git_info(self) -> Dict[str, Any]:
+        """Get git commit, dirty flag, and branch for reproducibility."""
+        import subprocess
+        info = {"commit": "unknown", "dirty": False, "branch": "unknown"}
+        try:
+            # Get commit hash
+            result = subprocess.run(
+                ["git", "rev-parse", "HEAD"],
+                capture_output=True, text=True, timeout=5
+            )
+            if result.returncode == 0:
+                info["commit"] = result.stdout.strip()[:12]
+
+            # Check if working tree is dirty
+            result = subprocess.run(
+                ["git", "status", "--porcelain"],
+                capture_output=True, text=True, timeout=5
+            )
+            if result.returncode == 0:
+                info["dirty"] = len(result.stdout.strip()) > 0
+
+            # Get current branch
+            result = subprocess.run(
+                ["git", "rev-parse", "--abbrev-ref", "HEAD"],
+                capture_output=True, text=True, timeout=5
+            )
+            if result.returncode == 0:
+                info["branch"] = result.stdout.strip()
+        except Exception:
+            pass
+        return info
 
     @property
     def stage3_path(self) -> Path:

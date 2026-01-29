@@ -100,7 +100,9 @@ class MiniShipAISCommsEnv:
         self._staging_enable = bool(self.cfg.get("staging_enable", True))
         self._staging: Optional[StagingSink] = None
         if self._staging_enable:
-            self._staging = StagingSink.from_run(self._run)
+            # Build run-level metadata for reproducibility
+            run_metadata = self._build_run_metadata()
+            self._staging = StagingSink.from_run(self._run, run_metadata=run_metadata)
 
         # ---- Recording options ----
         # Control what data is recorded (can disable for performance)
@@ -237,6 +239,55 @@ class MiniShipAISCommsEnv:
             hashes["pf_cfg_sha256"] = "unknown"
 
         return hashes
+
+    def _build_run_metadata(self) -> Dict[str, Any]:
+        """
+        Build run-level metadata for shard_header.
+
+        Captures training configuration for reproducibility:
+        - Training hyperparameters (from cfg)
+        - Config file hashes
+        - RL/safety mechanism settings
+        """
+        import hashlib
+
+        cfg = self.cfg
+        metadata = {}
+
+        # Training hyperparameters (subset relevant for analysis)
+        train_args = {
+            "N": int(cfg.get("N", 2)),
+            "dt": float(cfg.get("dt", 0.5)),
+            "T_max": float(cfg.get("T_max", 220.0)),
+            "use_lagrangian": bool(cfg.get("use_lagrangian", True)),
+            "use_guard": bool(cfg.get("use_guard", True)),
+            "use_ais_obs": bool(cfg.get("use_ais_obs", False)),
+            "ais_cfg_path": str(cfg.get("ais_cfg_path", "")),
+            # RL hyperparameters (if present)
+            "lr": float(cfg.get("lr", cfg.get("learning_rate", 0.0))),
+            "train_batch_size": int(cfg.get("train_batch_size", 0)),
+            "sgd_minibatch_size": int(cfg.get("sgd_minibatch_size", 0)),
+            "num_sgd_iter": int(cfg.get("num_sgd_iter", 0)),
+            "entropy_coeff": float(cfg.get("entropy_coeff", 0.0)),
+            # Lagrangian settings
+            "dual_freeze": bool(cfg.get("dual_freeze", False)),
+            "dual_update_in_env": bool(cfg.get("dual_update_in_env", False)),
+            # Safety/guard settings
+            "guard_mode": str(cfg.get("guard_mode", "")),
+        }
+        metadata["train_args"] = train_args
+
+        # Config file hashes (for detecting content changes)
+        ais_cfg_path = cfg.get("ais_cfg_path", "")
+        if ais_cfg_path:
+            try:
+                with open(ais_cfg_path, "rb") as f:
+                    metadata["ais_cfg_sha256"] = hashlib.sha256(f.read()).hexdigest()[:16]
+                metadata["ais_cfg_path"] = str(ais_cfg_path)
+            except Exception:
+                metadata["ais_cfg_sha256"] = "unknown"
+
+        return metadata
 
     def _get_pf_config(self) -> Dict[str, Any]:
         """
@@ -526,20 +577,38 @@ class MiniShipAISCommsEnv:
     def _get_per_ship_comm_stats(self) -> Dict[int, Dict[str, Any]]:
         """
         Get per-ship communication statistics for diagnostic analysis.
-        Enables identifying which ship/link has problems.
+
+        Enables attributing PF errors to specific ship's communication quality:
+        - Which target ship's messages are delayed/dropped
+        - Last RX timing (for causality analysis: comm delay → PF error → risk)
+
+        Returns:
+            Dict[ship_id, {
+                rx_count, delay_mean/p95/max, age_mean/p95/max,
+                last_rx_delay_s, last_rx_age_s, last_rx_report_ts, last_rx_arrival_ts
+            }]
         """
         per_ship: Dict[int, Dict[str, Any]] = {}
 
         try:
-            # Try to get per-ship metrics from AIS
             if hasattr(self._ais, "get_per_ship_metrics"):
                 raw = self._ais.get_per_ship_metrics()
                 for sid, metrics in raw.items():
-                    per_ship[int(sid)] = self._clean_comm_stats(metrics)
-            elif hasattr(self._ais, "per_ship_stats"):
-                raw = getattr(self._ais, "per_ship_stats", {})
-                for sid, metrics in raw.items():
-                    per_ship[int(sid)] = self._clean_comm_stats(metrics)
+                    # Keep per-ship specific fields (don't clean like global stats)
+                    per_ship[int(sid)] = {
+                        "rx_count": int(metrics.get("rx_count", 0)),
+                        "delay_mean": float(metrics.get("delay_mean", 0.0)),
+                        "delay_p95": float(metrics.get("delay_p95", 0.0)),
+                        "delay_max": float(metrics.get("delay_max", 0.0)),
+                        "age_mean": float(metrics.get("age_mean", 0.0)),
+                        "age_p95": float(metrics.get("age_p95", 0.0)),
+                        "age_max": float(metrics.get("age_max", 0.0)),
+                        # Last RX info (critical for PF error attribution)
+                        "last_rx_delay_s": float(metrics.get("last_rx_delay_s", 0.0)),
+                        "last_rx_age_s": float(metrics.get("last_rx_age_s", 0.0)),
+                        "last_rx_report_ts": float(metrics.get("last_rx_report_ts", 0.0)),
+                        "last_rx_arrival_ts": float(metrics.get("last_rx_arrival_ts", 0.0)),
+                    }
         except Exception:
             pass
 
