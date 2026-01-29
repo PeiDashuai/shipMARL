@@ -88,6 +88,11 @@ class MiniShipLagrangianParallelEnv(ParallelEnv):
         return getattr(self.core, "state", None)
 
     @property
+    def core_env(self):
+        """Expose core env for callbacks to access _last_infos."""
+        return self.core
+
+    @property
     def observation_spaces(self):
         # PettingZoo 并行 env 约定：dict[agent] -> space
         # 注意：这里用 self.env（可能已经包了 AIS），不是 self.core

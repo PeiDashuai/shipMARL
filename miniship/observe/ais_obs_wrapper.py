@@ -96,6 +96,11 @@ class AISObsWrapper(ParallelEnv):
     # ------------------------------------------------------------------
 
     @property
+    def core_env(self):
+        """Expose core env for callbacks to access _last_infos through wrapper chain."""
+        return getattr(self.env, "core_env", None) or self.env
+
+    @property
     def observation_spaces(self):
         if self._obs_space is None:
             if hasattr(self.env, "observation_spaces") and self.agents:

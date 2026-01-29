@@ -139,6 +139,11 @@ class MiniShipAISCommsEnv:
     # ---------------- PettingZoo parallel API delegation ----------------
 
     @property
+    def core_env(self):
+        """Expose core env for callbacks to access _last_infos through wrapper chain."""
+        return getattr(self._core, "core_env", None) or getattr(self._core, "core", None) or self._core
+
+    @property
     def possible_agents(self):
         return self._core.possible_agents
 

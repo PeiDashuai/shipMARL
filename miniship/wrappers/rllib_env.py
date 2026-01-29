@@ -414,6 +414,11 @@ class MiniShipMultiAgentWrapper(MultiAgentEnv):
     def agents(self):
         return list(self._agent_ids)
 
+    @property
+    def core_env(self):
+        """Expose core env for callbacks to access _last_infos through wrapper chain."""
+        return getattr(self._env, "core_env", None) or getattr(self._env, "core", None) or self._env
+
     # ------------------------------------------------------------------
     # reset/step
     # ------------------------------------------------------------------
