@@ -173,30 +173,6 @@ class PFAgeGatingConfig:
     q_yawd_age_rate_std: float = 0.0         # rad/s^2, extra Q yawd std ~ rate_std * age
 
 
-    # =========================
-    # NEW: R->Q shift switches
-    # =========================
-    use_q_gap_inflation: bool = True          # age 主要作用转移到 Q（update 前扩散）
-    use_r_continuous_inflation: bool = False  # 若要回退旧行为，可设 True（不建议）
-
-    # NEW: Q gap 扩散 caps（建议远小于 R caps，避免一次扩散过猛）
-    q_pos_std_max: float = 60.0               # meters, extra Q pos std cap
-    q_sog_std_max: float = 2.0                # m/s, extra Q sog std cap
-    q_yaw_std_max: float = math.radians(45.0) # rad, extra Q yaw std cap (可先不用)
-    q_yawd_std_max: float = math.radians(10.0)# rad/s, extra Q yawd std cap
-
-    # NEW: yaw gating / annealing
-    yaw_gate_enable: bool = True
-    yaw_gate_age: float = 2.5                # age >= 该值才允许触发 yaw 门控
-    yaw_gate_innov_deg: float = 35.0         # |wrap(z_yaw - yaw_pred)| 超过该阈值触发
-    yaw_gate_sigma_mult: float = 6.0         # 触发后 sigma_yaw *= mult（再 clip 到 yaw_std_max）
-
-    # NEW: 可选的 Q yaw/yawd 扩散强度（默认先关：0.0）
-    q_yaw_age_rate_std: float = 0.0          # rad/s, extra Q yaw std ~ rate_std * age
-    q_yawd_age_rate_std: float = 0.0         # rad/s^2, extra Q yawd std ~ rate_std * age
-
-
-
 @dataclass
 class PFNoiseConfig:
     # --------- process noise (CTRV simplified) ----------
@@ -237,34 +213,6 @@ class PFNoiseConfig:
     yawd_soft_gain: float = 0.10           # 建议 0.05~0.15，小一点更稳
     yawd_soft_min_dt: float = 0.10         # s，dt 太小会导致 dpsi/dt 爆
     yawd_soft_max_innov_deg: float = 25.0  # deg，创新太大通常是 outlier/错配，别用来估 yawd
-
-    # ---------------- robust update switches ----------------
-    # If True: yaw enters weight likelihood (can sharpen likelihood and collapse NEFF).
-    # Recommended default: False (yaw handled via conditional soft update).
-    use_yaw_in_weight: bool = False
-
-    # yaw soft update (state correction, does NOT enter weights)
-    yaw_soft_enable: bool = True
-    yaw_soft_gain: float = 0.18              # base gain (before sigma-based attenuation)
-    yaw_soft_min_speed: float = 0.3          # m/s
-    yaw_soft_max_abs_yawd: float = 0.45      # rad/s  (maneuver gate)
-    yaw_soft_max_age: float = 2.5            # s      (stale yaw => skip)
-    yaw_soft_jitter_deg: float = 0.4         # deg    (small diversity to avoid particle lock)
-
-
-    # NEW: innovation-aware taper/skip (independent of age)
-    # - when yaw innovation is moderately large, taper gain down
-    # - when yaw innovation is extremely large, skip yaw correction entirely
-    yaw_soft_taper_start_deg: float = 25.0   # deg
-    yaw_soft_taper_end_deg: float = 90.0     # deg
-    yaw_soft_outlier_skip_deg: float = 150.0 # deg
-
-    # >>> NEW: yawd soft update (turn-rate correction, does NOT enter weights)
-    yawd_soft_enable: bool = True
-    yawd_soft_gain: float = 0.10           # 建议 0.05~0.15，小一点更稳
-    yawd_soft_min_dt: float = 0.10         # s，dt 太小会导致 dpsi/dt 爆
-    yawd_soft_max_innov_deg: float = 25.0  # deg，创新太大通常是 outlier/错配，别用来估 yawd
-
 
     # --------- AGE gating ----------
     age: PFAgeGatingConfig = field(default_factory=PFAgeGatingConfig)
@@ -422,71 +370,8 @@ class ParticleCTRVFilter:
 
         if sigma_sog > 0.0:
             self.x_particles[:, 2] += self.rng.normal(0.0, sigma_sog, size=self.N)
-
-        # --- optional yaw/yawd diffusion (default 0) ---
-        q_yaw_rate = float(getattr(ag, "q_yaw_age_rate_std", 0.0))
-        q_yawd_rate = float(getattr(ag, "q_yawd_age_rate_std", 0.0))
-
-        sigma_yaw = q_yaw_rate * gap
-        sigma_yawd = q_yawd_rate * gap
-
-        sigma_yaw = min(sigma_yaw, float(getattr(ag, "q_yaw_std_max", math.radians(45.0))))
-        sigma_yawd = min(sigma_yawd, float(getattr(ag, "q_yawd_std_max", math.radians(10.0))))
-
-        if sigma_yaw > 0.0:
-            self.x_particles[:, 3] = _wrap_pi_np(
-                self.x_particles[:, 3] + self.rng.normal(0.0, sigma_yaw, size=self.N)
-            )
-        if sigma_yawd > 0.0:
-            self.x_particles[:, 4] += self.rng.normal(0.0, sigma_yawd, size=self.N)
-
-        # keep bounds
-        yclip = float(self.cfg.noise.yawd_clip)
-        self.x_particles[:, 4] = np.clip(self.x_particles[:, 4], -yclip, yclip)
-        self.x_particles[:, 3] = _wrap_pi_np(self.x_particles[:, 3])
-
-
-    def _apply_gap_process_noise(self, gap: float, meas: Dict[str, Any] | None = None):
-        """
-        Move staleness effect from R -> Q:
-        Before applying measurement likelihood, diffuse particles according to gap(age).
-        This helps keep R tight (so measurement can pull back), while representing uncertainty as process noise.
-        """
-        if self.x_particles is None:
-            return
-
-        ag = self.cfg.noise.age
-        if not bool(getattr(ag, "use_q_gap_inflation", True)):
-            return
-
-        gap = float(max(0.0, gap))
-        if gap <= 0.0:
-            return
-
-        # reference speed for diffusion scale
-        v_ref = 0.0
-        try:
-            if isinstance(meas, dict) and ("sog" in meas):
-                v_ref = float(meas["sog"])
-            else:
-                v_ref = float(self.x[2]) if hasattr(self, "x") else 0.0
-        except Exception:
-            v_ref = 0.0
-        v_ref = max(0.0, v_ref)
-
-        # --- main diffusion (pos/sog) ---
-        sigma_pos = float(ag.pos_age_v_gain) * v_ref * gap
-        sigma_sog = float(ag.sog_age_a_gain) * gap
-
-        sigma_pos = min(sigma_pos, float(getattr(ag, "q_pos_std_max", 60.0)))
-        sigma_sog = min(sigma_sog, float(getattr(ag, "q_sog_std_max", 2.0)))
-
-        if sigma_pos > 0.0:
-            self.x_particles[:, 0] += self.rng.normal(0.0, sigma_pos, size=self.N)
-            self.x_particles[:, 1] += self.rng.normal(0.0, sigma_pos, size=self.N)
-
-        if sigma_sog > 0.0:
-            self.x_particles[:, 2] += self.rng.normal(0.0, sigma_sog, size=self.N)
+            # Enforce speed >= 0 (negative speed violates physics and causes NaN in atan2)
+            self.x_particles[:, 2] = np.maximum(self.x_particles[:, 2], 0.0)
 
         # --- optional yaw/yawd diffusion (default 0) ---
         q_yaw_rate = float(getattr(ag, "q_yaw_age_rate_std", 0.0))
@@ -935,16 +820,6 @@ class ParticleCTRVFilter:
             yaw_innov_abs=yaw_innov_abs,
         )
 
-        try:
-            meas["age"] = float(age)
-        except Exception:
-            pass
-        self._meas_likelihood_update(
-            meas, sigma_pos, sigma_sog, sigma_yaw,
-            age=float(age),
-            yaw_innov_abs=yaw_innov_abs,
-        )
-
     def step_delay_robust(self, env_time: float, meas: Dict[str, Any], age: float):
         """
         STAGE-4: Delay-robust update on PF axis (ENV time).
@@ -1067,9 +942,17 @@ class ParticleCTRVFilter:
         py = float(np.average(xp[:, 1], weights=w))
         v  = float(np.average(xp[:, 2], weights=w))
 
+        # Enforce v >= 0 in estimate (physics constraint)
+        v = max(0.0, v)
+
+        # Circular mean for yaw
         s = float(np.sum(w * np.sin(xp[:, 3])))
         c = float(np.sum(w * np.cos(xp[:, 3])))
         yaw = float(math.atan2(s, c))
+
+        # NaN protection: if atan2 returns NaN or inf (degenerate case), use previous or 0
+        if not math.isfinite(yaw):
+            yaw = float(self.x[3]) if (hasattr(self, "x") and len(self.x) > 3 and math.isfinite(self.x[3])) else 0.0
         yaw = _wrap_pi(yaw)
 
         yawd = float(np.average(xp[:, 4], weights=w))
