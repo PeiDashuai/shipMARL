@@ -344,6 +344,12 @@ class MiniShipCallbacks(DefaultCallbacks):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
 
+        # Register custom model in each worker (needed for Ray worker processes)
+        try:
+            register_miniship_gnn_lstm_model()
+        except Exception:
+            pass  # Already registered or import issue
+
         # reward shaping knobs (default; overridden by env_cfg)
         self.step_cost = 0.03
         self.reward_scale = 1.0
@@ -558,13 +564,17 @@ class MiniShipCallbacks(DefaultCallbacks):
 
         rec = self._get_recorder(env_cfg=env_cfg, worker_index=wid, vector_index=vid)
 
-        # Phase2 strict: episode_uid must come from env.reset and be exposed here
-        episode_uid = _get_env_episode_uid_strict(real_env, strict=self._staging_strict)
-        episode.user_data["episode_uid"] = episode_uid  # keep for end
-
         # Skip staging if no recorder (missing run_uuid)
         if rec is None:
+            # Still try to get episode_uid non-strictly for metrics
+            episode_uid = _get_env_episode_uid_strict(real_env, strict=False)
+            episode.user_data["episode_uid"] = episode_uid
             return
+
+        # Phase2 strict: episode_uid must come from env.reset and be exposed here
+        # Only enforce strict mode when recorder is available
+        episode_uid = _get_env_episode_uid_strict(real_env, strict=self._staging_strict)
+        episode.user_data["episode_uid"] = episode_uid  # keep for end
 
         ep_params, ep_params_src = _extract_episode_params_best_effort(real_env)
         tm_snap = _extract_trackmgr_cfg_best_effort(real_env)
@@ -986,20 +996,22 @@ def build_ppo_config(args, run_uuid: str) -> PPOConfig:
     )
 
     if args.model == "gnn_lstm":
-        # Note: Model must be registered in workers via ray.tune.registry
-        # For now, we skip custom model registration as it requires special handling
-        # Use default MLP model instead
-        print("[shipMARL] Warning: GNN-LSTM model requires special Ray worker setup. Using default MLP.")
-        # config = config.training(
-        #     model={
-        #         "custom_model": "miniship_gnn_lstm_ac",
-        #         "custom_model_config": {
-        #             "gnn_hidden": 64,
-        #             "lstm_hidden": 128,
-        #             "num_gnn_layers": 2,
-        #         },
-        #     }
-        # )
+        # Model is registered in MiniShipCallbacks.__init__ for each worker
+        print("[shipMARL] Using GNN-LSTM model")
+        config = config.training(
+            model={
+                "custom_model": "miniship_gnn_lstm_ac",
+                "custom_model_config": {
+                    "gnn_hidden_size": 128,
+                    "lstm_hidden_size": 128,
+                    "num_neighbors": 6,
+                    "neighbor_dim": 11,
+                    "edge_dim": 8,
+                    "id_dim": 1,
+                },
+                "max_seq_len": 64,
+            }
+        )
 
     return config
 
