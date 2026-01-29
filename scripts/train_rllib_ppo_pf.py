@@ -977,16 +977,20 @@ def build_ppo_config(args, run_uuid: str) -> PPOConfig:
     )
 
     if args.model == "gnn_lstm":
-        config = config.training(
-            model={
-                "custom_model": "miniship_gnn_lstm",
-                "custom_model_config": {
-                    "gnn_hidden": 64,
-                    "lstm_hidden": 128,
-                    "num_gnn_layers": 2,
-                },
-            }
-        )
+        # Note: Model must be registered in workers via ray.tune.registry
+        # For now, we skip custom model registration as it requires special handling
+        # Use default MLP model instead
+        print("[shipMARL] Warning: GNN-LSTM model requires special Ray worker setup. Using default MLP.")
+        # config = config.training(
+        #     model={
+        #         "custom_model": "miniship_gnn_lstm_ac",
+        #         "custom_model_config": {
+        #             "gnn_hidden": 64,
+        #             "lstm_hidden": 128,
+        #             "num_gnn_layers": 2,
+        #         },
+        #     }
+        # )
 
     return config
 
