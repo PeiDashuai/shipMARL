@@ -380,7 +380,7 @@ class MiniShipCallbacks(DefaultCallbacks):
         # STAGING recorder cache: key=(mode, wid, v) -> recorder
         self._staging_recorders: Dict[tuple, StageRecorder] = {}
         self._staging_out_dir: Optional[str] = None
-        self._staging_strict: bool = True
+        self._staging_strict: bool = False  # Relaxed: don't block training if env lacks episode_uid
 
         # init latch from env_cfg
         self._cfg_initialized = False
@@ -572,8 +572,9 @@ class MiniShipCallbacks(DefaultCallbacks):
             return
 
         # Phase2 strict: episode_uid must come from env.reset and be exposed here
-        # Only enforce strict mode when recorder is available
-        episode_uid = _get_env_episode_uid_strict(real_env, strict=self._staging_strict)
+        # For now, use non-strict mode to avoid blocking training when env doesn't expose episode_uid
+        # This can happen with AIS environments or other wrapped envs
+        episode_uid = _get_env_episode_uid_strict(real_env, strict=False)
         episode.user_data["episode_uid"] = episode_uid  # keep for end
 
         ep_params, ep_params_src = _extract_episode_params_best_effort(real_env)
