@@ -108,7 +108,9 @@ class MiniShipAISCommsEnv:
         # Control what data is recorded (can disable for performance)
         self._record_step_data = bool(self.cfg.get("staging_record_steps", True))
         self._record_pf_estimates = bool(self.cfg.get("staging_record_pf", True))
-        self._record_per_ship_comm = bool(self.cfg.get("staging_record_per_ship_comm", False))
+        # Per-ship/per-link comm stats (default ON for causality analysis)
+        self._record_per_ship_comm = bool(self.cfg.get("staging_record_per_ship_comm", True))
+        self._record_per_link_comm = bool(self.cfg.get("staging_record_per_link_comm", True))
 
         # episode identity allocator
         self._ep_alloc = EpisodeIdAllocator(self._run)
@@ -580,11 +582,14 @@ class MiniShipAISCommsEnv:
 
         Enables attributing PF errors to specific ship's communication quality:
         - Which target ship's messages are delayed/dropped
+        - TX/drop/reorder counts per ship (for "which ship's comms are bad")
         - Last RX timing (for causality analysis: comm delay → PF error → risk)
 
         Returns:
             Dict[ship_id, {
-                rx_count, delay_mean/p95/max, age_mean/p95/max,
+                tx_count, drop_count, rx_count, reorder_count,
+                ppr, pdr, drop_rate, reorder_rate,
+                delay_mean/p95/max, age_mean/p95/max,
                 last_rx_delay_s, last_rx_age_s, last_rx_report_ts, last_rx_arrival_ts
             }]
         """
@@ -594,9 +599,18 @@ class MiniShipAISCommsEnv:
             if hasattr(self._ais, "get_per_ship_metrics"):
                 raw = self._ais.get_per_ship_metrics()
                 for sid, metrics in raw.items():
-                    # Keep per-ship specific fields (don't clean like global stats)
                     per_ship[int(sid)] = {
+                        # Counts (new: tx_count, drop_count, reorder_count)
+                        "tx_count": int(metrics.get("tx_count", 0)),
+                        "drop_count": int(metrics.get("drop_count", 0)),
                         "rx_count": int(metrics.get("rx_count", 0)),
+                        "reorder_count": int(metrics.get("reorder_count", 0)),
+                        # Derived rates (new: ppr, pdr, drop_rate, reorder_rate)
+                        "ppr": float(metrics.get("ppr", 0.0)),
+                        "pdr": float(metrics.get("pdr", 0.0)),
+                        "drop_rate": float(metrics.get("drop_rate", 0.0)),
+                        "reorder_rate": float(metrics.get("reorder_rate", 0.0)),
+                        # Delay/age stats
                         "delay_mean": float(metrics.get("delay_mean", 0.0)),
                         "delay_p95": float(metrics.get("delay_p95", 0.0)),
                         "delay_max": float(metrics.get("delay_max", 0.0)),
@@ -613,6 +627,56 @@ class MiniShipAISCommsEnv:
             pass
 
         return per_ship
+
+    def _get_per_link_comm_stats(self) -> Dict[str, Dict[str, Any]]:
+        """
+        Get per-link (rx_agent, tx_ship) communication statistics.
+
+        Enables answering "same target, different receiver" questions:
+        - Does agent_i receive ship_k's messages worse than agent_j?
+        - Link-level causality: link quality → agent's PF error → agent's action
+
+        Returns:
+            Dict["rx_agent:tx_ship", {
+                tx_count, drop_count, rx_count, reorder_count,
+                ppr, pdr, drop_rate, reorder_rate,
+                delay_mean/p95/max, age_mean/p95/max
+            }]
+        """
+        per_link: Dict[str, Dict[str, Any]] = {}
+
+        try:
+            if hasattr(self._ais, "get_per_link_metrics"):
+                raw = self._ais.get_per_link_metrics()
+                for link_key, metrics in raw.items():
+                    # link_key is (rx_agent, tx_ship) tuple
+                    rx_agent, tx_ship = link_key
+                    key_str = f"{rx_agent}:{tx_ship}"
+                    per_link[key_str] = {
+                        "rx_agent_id": str(rx_agent),
+                        "tx_ship_id": int(tx_ship),
+                        # Counts
+                        "tx_count": int(metrics.get("tx_count", 0)),
+                        "drop_count": int(metrics.get("drop_count", 0)),
+                        "rx_count": int(metrics.get("rx_count", 0)),
+                        "reorder_count": int(metrics.get("reorder_count", 0)),
+                        # Derived rates
+                        "ppr": float(metrics.get("ppr", 0.0)),
+                        "pdr": float(metrics.get("pdr", 0.0)),
+                        "drop_rate": float(metrics.get("drop_rate", 0.0)),
+                        "reorder_rate": float(metrics.get("reorder_rate", 0.0)),
+                        # Delay/age stats
+                        "delay_mean": float(metrics.get("delay_mean", 0.0)),
+                        "delay_p95": float(metrics.get("delay_p95", 0.0)),
+                        "delay_max": float(metrics.get("delay_max", 0.0)),
+                        "age_mean": float(metrics.get("age_mean", 0.0)),
+                        "age_p95": float(metrics.get("age_p95", 0.0)),
+                        "age_max": float(metrics.get("age_max", 0.0)),
+                    }
+        except Exception:
+            pass
+
+        return per_link
 
     def _infer_term_reason(self, infos: Dict[str, Any]) -> str:
         """Infer termination reason from infos."""
@@ -689,6 +753,9 @@ class MiniShipAISCommsEnv:
         # ---- Per-ship comm stats (for diagnostics) ----
         per_ship_comm_final = self._get_per_ship_comm_stats() if self._record_per_ship_comm else None
 
+        # ---- Per-link comm stats (rx_agent, tx_ship) for causality analysis ----
+        per_link_comm_final = self._get_per_link_comm_stats() if self._record_per_link_comm else None
+
         # ---- Final Lagrangian state ----
         lagrangian_final = self._get_lagrangian_state()
 
@@ -724,6 +791,7 @@ class MiniShipAISCommsEnv:
             # Comm stats (episode-level)
             "comm_stats": comm_stats,
             "per_ship_comm": per_ship_comm_final,  # Per-ship diagnostics (if enabled)
+            "per_link_comm": per_link_comm_final,  # Per-link (rx_agent, tx_ship) diagnostics
 
             # Final Lagrangian state (for constraint analysis)
             "lagrangian_final": lagrangian_final,
@@ -870,9 +938,23 @@ class MiniShipAISCommsEnv:
             if self._record_per_ship_comm:
                 per_ship_comm = self._get_per_ship_comm_stats()
 
+            # Get per-link comm stats (optional, for causality analysis)
+            per_link_comm = None
+            if self._record_per_link_comm:
+                per_link_comm = self._get_per_link_comm_stats()
+
             # Get PF estimates (optional, can be expensive)
             if self._record_pf_estimates:
                 pf_estimates = self._track_mgr.get_pf_estimates_for_staging(t, true_states)
+
+            # Build extra dict for diagnostics
+            extra = None
+            if per_ship_comm or per_link_comm:
+                extra = {}
+                if per_ship_comm:
+                    extra["per_ship_comm"] = per_ship_comm
+                if per_link_comm:
+                    extra["per_link_comm"] = per_link_comm
 
             # Emit comprehensive step record
             self._staging.emit_stage3_step(
@@ -883,9 +965,7 @@ class MiniShipAISCommsEnv:
                 rl_data=rl_data,
                 comm_stats=comm_stats,
                 pf_estimates=pf_estimates,
-                extra={
-                    "per_ship_comm": per_ship_comm,
-                } if per_ship_comm else None,
+                extra=extra,
             )
 
         # Accumulate PF errors for episode summary

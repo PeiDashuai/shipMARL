@@ -909,6 +909,9 @@ class PFTrack:
     recent_fused_msg_ids: deque[str] = field(default_factory=lambda: deque(maxlen=64))
     valid: bool = True
 
+    # ----- measurement counts (for diagnostics) -----
+    meas_count: int = 0  # total measurements fused since track init
+
 
 
 @dataclass
@@ -927,6 +930,9 @@ class AgentPFState:
     last_rep_ts: Dict[int, float] = field(default_factory=dict)
     last_upd_ts: Dict[int, float] = field(default_factory=dict)
     last_arr_ts: Dict[int, float] = field(default_factory=dict)
+
+    # ----- per-step measurement counts (reset each step, for pure_predict detection) -----
+    step_meas_count: Dict[int, int] = field(default_factory=dict)  # ship_id -> meas count this step
 
     # ego yaw cache (debug-only)
     ego_yaw_sim_rad: float = float("nan")
@@ -2727,132 +2733,131 @@ class AISTrackManagerPF:
         true_states: Dict[ShipId, TrueState],
     ) -> List[Dict[str, Any]]:
         """
-        Get PF estimates for all ships with error metrics for staging recording.
+        Get PF estimates for all (agent, target) pairs with error metrics for staging.
 
-        Returns a list of dicts, one per ship, containing:
-          - ship_id
+        IMPORTANT: Returns per-agent-per-target records (not per-target only).
+        This enables causality analysis: agent_i's observation error → agent_i's action/risk.
+
+        Returns a list of dicts, one per (rx_agent_id, ship_id) pair, containing:
+          - rx_agent_id: which agent's PF produced this estimate
+          - ship_id: target ship being tracked
           - Estimate: est_x, est_y, est_vx, est_vy, est_psi, est_sog
           - Truth: true_x, true_y, true_vx, true_vy, true_psi, true_sog
           - Errors: pos_error, vel_error, heading_error
           - Track quality: track_age, num_particles, eff_particles
+          - PF diagnostics: neff, resampled, collapsed, pure_predict, meas_count_this_step
         """
         import math
         results = []
         t_env = float(t)
 
-        # Get all ship IDs from true_states
-        for sid, true_st in true_states.items():
-            sid = int(sid)
+        # Iterate over all agents (observers)
+        for agent_id, agent_st in self.agent_states.items():
+            if agent_st is None:
+                continue
 
-            # Find PF estimate for this ship (from any agent that has it)
-            est_found = False
-            est_x, est_y, est_vx, est_vy, est_psi = 0.0, 0.0, 0.0, 0.0, 0.0
-            track_age = float("inf")
-            num_particles = 0
-            eff_particles = 0.0
+            # Get ego ship ID for this agent (skip self-tracking)
+            ego_sid = self._ego_sid_of_agent(agent_id)
 
-            for agent_id, agent_st in self.agent_states.items():
-                if agent_st is None:
+            # For each target ship in true_states
+            for sid, true_st in true_states.items():
+                sid = int(sid)
+
+                # Skip self-tracking (agent tracking its own ship)
+                if ego_sid is not None and sid == ego_sid:
                     continue
+
+                # Get truth values
+                true_x = float(true_st.x)
+                true_y = float(true_st.y)
+                true_vx = float(true_st.vx)
+                true_vy = float(true_st.vy)
+                true_psi = float(true_st.yaw_east_ccw_rad)
+                true_sog = float(true_st.sog)
+
+                # Get this agent's track for this target
                 tr = agent_st.tracks.get(sid, None)
-                if tr is None:
-                    continue
 
-                pf = tr.pf
-                if pf is None or pf.last_ts is None:
-                    continue
-
-                # Get estimate at current time
-                try:
-                    x_pred, _ = self._predict_x_readonly(pf, t_env)
-                    if x_pred is not None:
-                        est_x = float(x_pred[0])
-                        est_y = float(x_pred[1])
-                        est_vx = float(x_pred[2])
-                        est_vy = float(x_pred[3])
-                        est_psi = float(math.atan2(est_vy, est_vx))
-                        track_age = t_env - float(pf.last_ts)
-                        num_particles = int(getattr(pf, "N", 0))
-                        # Effective sample size estimation
-                        w = getattr(pf, "w", None)
-                        if w is not None and len(w) > 0:
-                            w_sum = float(sum(w))
-                            if w_sum > 0:
-                                w_norm = [wi / w_sum for wi in w]
-                                eff_particles = 1.0 / sum(wi * wi for wi in w_norm) if sum(wi * wi for wi in w_norm) > 0 else 0.0
-                        est_found = True
-                        break
-                except Exception:
-                    continue
-
-            # Compute truth values
-            true_x = float(true_st.x)
-            true_y = float(true_st.y)
-            true_vx = float(true_st.vx)
-            true_vy = float(true_st.vy)
-            true_psi = float(true_st.yaw_east_ccw_rad)
-            true_sog = float(true_st.sog)
-
-            # Compute errors
-            if est_found:
-                est_sog = math.hypot(est_vx, est_vy)
-                pos_error = math.hypot(est_x - true_x, est_y - true_y)
-                vel_error = abs(est_sog - true_sog)
-                heading_error = est_psi - true_psi
-                # Wrap to [-pi, pi]
-                while heading_error > math.pi:
-                    heading_error -= 2 * math.pi
-                while heading_error < -math.pi:
-                    heading_error += 2 * math.pi
-            else:
-                # No estimate found - use truth as fallback with zero error
-                est_x, est_y = true_x, true_y
-                est_vx, est_vy = true_vx, true_vy
-                est_psi = true_psi
+                # Default values for no-track case
+                est_found = False
+                est_x, est_y, est_vx, est_vy, est_psi = true_x, true_y, true_vx, true_vy, true_psi
                 est_sog = true_sog
-                pos_error = 0.0
-                vel_error = 0.0
-                heading_error = 0.0
-                track_age = 0.0
+                track_age = -1.0
+                num_particles = 0
+                eff_particles = 0.0
+                pos_error, vel_error, heading_error = 0.0, 0.0, 0.0
 
-            # ---------------------------------------------------------------------------
-            # PF diagnostic fields for divergence/freeze/reorder detection
-            # These fields enable post-hoc causality analysis: Comm → PF → RL
-            # ---------------------------------------------------------------------------
-            pf_diag = {
-                # Track timestamps (from PFTrack)
-                "last_reported_ts": None,      # last ts_rep fused (message timestamp)
-                "last_update_ts": None,        # last t_env fused (PF axis)
-                "last_arrival_ts": None,       # last ts_arr (metadata)
-                "last_meas_x": None,           # last fused x (projected to t_env)
-                "last_meas_y": None,           # last fused y (projected to t_env)
-                "track_valid": True,           # staleness validity
-                # PF update stats (from pf.last_update_stats)
-                "neff": None,                  # effective sample size after last update
-                "resampled": None,             # was resampling triggered?
-                "collapsed": None,             # did weights collapse?
-                "sigma_pos": None,             # measurement noise std for position
-                "sigma_sog": None,             # measurement noise std for SOG
-                "sigma_yaw": None,             # measurement noise std for yaw
-                "meas_age": None,              # age used in last update
-                # Derived indicators
-                "info_age": None,              # t_env - last_reported_ts
-                "silence": None,               # t_env - last_update_ts
-            }
+                # PF diagnostic fields
+                pf_diag = {
+                    # Track timestamps
+                    "last_reported_ts": None,
+                    "last_update_ts": None,
+                    "last_arrival_ts": None,
+                    "last_meas_x": None,
+                    "last_meas_y": None,
+                    "track_valid": False,
+                    # PF update stats
+                    "neff": None,
+                    "resampled": None,
+                    "collapsed": None,
+                    "sigma_pos": None,
+                    "sigma_sog": None,
+                    "sigma_yaw": None,
+                    "meas_age": None,
+                    # Derived indicators
+                    "info_age": None,
+                    "silence": None,
+                    # New v2.1 fields for pure-predict detection
+                    "pure_predict": True,           # True if no meas this step (prediction only)
+                    "meas_count_this_step": 0,      # Number of meas ingested this step for this target
+                    "meas_count_total": 0,          # Total meas ingested for this target (since track init)
+                }
 
-            # Extract diagnostic fields if estimate was found
-            if est_found and tr is not None:
-                # Track timestamps
-                pf_diag["last_reported_ts"] = getattr(tr, "last_reported_ts", None)
-                pf_diag["last_update_ts"] = getattr(tr, "last_update_ts", None)
-                pf_diag["last_arrival_ts"] = getattr(tr, "last_arrival_ts", None)
-                pf_diag["last_meas_x"] = getattr(tr, "last_meas_x", None)
-                pf_diag["last_meas_y"] = getattr(tr, "last_meas_y", None)
-                pf_diag["track_valid"] = getattr(tr, "valid", True)
+                if tr is not None and tr.pf is not None:
+                    pf = tr.pf
+                    if pf.last_ts is not None:
+                        try:
+                            x_pred, _ = self._predict_x_readonly(pf, t_env)
+                            if x_pred is not None:
+                                est_x = float(x_pred[0])
+                                est_y = float(x_pred[1])
+                                est_vx = float(x_pred[2])
+                                est_vy = float(x_pred[3])
+                                est_psi = float(math.atan2(est_vy, est_vx))
+                                est_sog = math.hypot(est_vx, est_vy)
+                                track_age = max(0.0, t_env - float(pf.last_ts))
+                                num_particles = int(getattr(pf, "N", 0))
 
-                # PF update stats
-                pf = tr.pf
-                if pf is not None:
+                                # Effective sample size
+                                w = getattr(pf, "w", None)
+                                if w is not None and len(w) > 0:
+                                    w_sum = float(sum(w))
+                                    if w_sum > 0:
+                                        w_norm = [wi / w_sum for wi in w]
+                                        eff_particles = 1.0 / sum(wi * wi for wi in w_norm) if sum(wi * wi for wi in w_norm) > 0 else 0.0
+
+                                est_found = True
+
+                                # Compute errors
+                                pos_error = math.hypot(est_x - true_x, est_y - true_y)
+                                vel_error = abs(est_sog - true_sog)
+                                heading_error = est_psi - true_psi
+                                while heading_error > math.pi:
+                                    heading_error -= 2 * math.pi
+                                while heading_error < -math.pi:
+                                    heading_error += 2 * math.pi
+                        except Exception:
+                            pass
+
+                    # Extract diagnostic fields from track
+                    pf_diag["last_reported_ts"] = getattr(tr, "last_reported_ts", None)
+                    pf_diag["last_update_ts"] = getattr(tr, "last_update_ts", None)
+                    pf_diag["last_arrival_ts"] = getattr(tr, "last_arrival_ts", None)
+                    pf_diag["last_meas_x"] = getattr(tr, "last_meas_x", None)
+                    pf_diag["last_meas_y"] = getattr(tr, "last_meas_y", None)
+                    pf_diag["track_valid"] = getattr(tr, "valid", True)
+
+                    # PF update stats from last_update_stats
                     stats = getattr(pf, "last_update_stats", {})
                     if isinstance(stats, dict):
                         pf_diag["neff"] = stats.get("neff", None)
@@ -2863,38 +2868,59 @@ class AISTrackManagerPF:
                         pf_diag["sigma_yaw"] = stats.get("sigma_yaw", None)
                         pf_diag["meas_age"] = stats.get("age", None)
 
-                # Derived indicators
-                last_rep = pf_diag["last_reported_ts"]
-                last_upd = pf_diag["last_update_ts"]
-                if last_rep is not None:
-                    pf_diag["info_age"] = max(0.0, t_env - float(last_rep))
-                if last_upd is not None:
-                    pf_diag["silence"] = max(0.0, t_env - float(last_upd))
+                    # Derived indicators
+                    last_rep = pf_diag["last_reported_ts"]
+                    last_upd = pf_diag["last_update_ts"]
+                    if last_rep is not None:
+                        pf_diag["info_age"] = max(0.0, t_env - float(last_rep))
+                    if last_upd is not None:
+                        pf_diag["silence"] = max(0.0, t_env - float(last_upd))
 
-            results.append({
-                "ship_id": sid,
-                "est_found": est_found,
-                "est_x": est_x,
-                "est_y": est_y,
-                "est_vx": est_vx,
-                "est_vy": est_vy,
-                "est_psi": est_psi,
-                "est_sog": math.hypot(est_vx, est_vy) if est_found else true_sog,
-                "true_x": true_x,
-                "true_y": true_y,
-                "true_vx": true_vx,
-                "true_vy": true_vy,
-                "true_psi": true_psi,
-                "true_sog": true_sog,
-                "pos_error": pos_error,
-                "vel_error": vel_error,
-                "heading_error": heading_error,
-                "track_age": track_age if track_age != float("inf") else -1.0,
-                "num_particles": num_particles,
-                "eff_particles": eff_particles,
-                # PF diagnostic fields (new)
-                **pf_diag,
-            })
+                    # Pure-predict detection: check if last_update_ts is current step
+                    # If silence > 0 (i.e., last update was before this step), it's pure predict
+                    silence = pf_diag["silence"]
+                    if silence is not None and silence < 0.01:  # Updated this step (within epsilon)
+                        pf_diag["pure_predict"] = False
+                    else:
+                        pf_diag["pure_predict"] = True
+
+                    # Meas count this step (from step_meas_count if tracked)
+                    step_meas = getattr(agent_st, "step_meas_count", {})
+                    pf_diag["meas_count_this_step"] = int(step_meas.get(sid, 0))
+
+                    # Total meas count (from track's update count)
+                    pf_diag["meas_count_total"] = int(getattr(tr, "meas_count", 0))
+
+                results.append({
+                    # Identity (rx_agent_id is the KEY addition for causality analysis)
+                    "rx_agent_id": str(agent_id),
+                    "ship_id": sid,
+                    "est_found": est_found,
+                    # Estimate
+                    "est_x": est_x,
+                    "est_y": est_y,
+                    "est_vx": est_vx,
+                    "est_vy": est_vy,
+                    "est_psi": est_psi,
+                    "est_sog": est_sog,
+                    # Truth
+                    "true_x": true_x,
+                    "true_y": true_y,
+                    "true_vx": true_vx,
+                    "true_vy": true_vy,
+                    "true_psi": true_psi,
+                    "true_sog": true_sog,
+                    # Errors
+                    "pos_error": pos_error,
+                    "vel_error": vel_error,
+                    "heading_error": heading_error,
+                    # Track quality
+                    "track_age": track_age,
+                    "num_particles": num_particles,
+                    "eff_particles": eff_particles,
+                    # PF diagnostic fields
+                    **pf_diag,
+                })
 
         return results
 
@@ -2940,6 +2966,8 @@ class AISTrackManagerPF:
             st = self._ensure_agent_state(rx_agent)
             st.debug_msg_count += len(msgs)
 
+            # Reset per-step measurement count (for pure_predict detection)
+            st.step_meas_count = {}
 
             # Resolve ego sid once (used for hard self-drop)
             ego_sid_rx = self._ego_sid_of_agent(rx_agent)
@@ -3569,6 +3597,10 @@ class AISTrackManagerPF:
                     pass
 
             track.valid = True
+
+            # Increment measurement counts (for pure_predict / meas_count diagnostics)
+            track.meas_count = getattr(track, "meas_count", 0) + 1
+            st.step_meas_count[sid] = st.step_meas_count.get(sid, 0) + 1
 
         # --- A. 新 Track 初始化 ---
         if tr is None:

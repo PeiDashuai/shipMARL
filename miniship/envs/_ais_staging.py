@@ -359,7 +359,7 @@ def build_rl_data_dict(
 # ===========================================================================
 # PF Estimate Schema Version (for data contract tracking)
 # ===========================================================================
-PF_ESTIMATE_SCHEMA_VERSION = "2.0"
+PF_ESTIMATE_SCHEMA_VERSION = "2.1"
 
 # Schema changelog:
 #   v1.0: Basic estimate + error fields
@@ -369,6 +369,11 @@ PF_ESTIMATE_SCHEMA_VERSION = "2.0"
 #         - PF health: neff, resampled, collapsed, track_valid
 #         - Measurement noise: sigma_pos, sigma_sog, sigma_yaw, meas_age
 #         - Derived indicators: info_age, silence
+#   v2.1: Added per-agent dimension and pure-predict detection
+#         - rx_agent_id: which agent's PF produced this estimate (KEY for causality)
+#         - pure_predict: True if no measurement this step (prediction only)
+#         - meas_count_this_step: measurements ingested this step for this target
+#         - meas_count_total: total measurements since track init
 
 
 def build_pf_estimate_dict(
@@ -386,6 +391,10 @@ def build_pf_estimate_dict(
     track_age: float = 0.0,
     num_particles: int = 0,
     eff_particles: float = 0.0,
+    # ===========================================================================
+    # v2.1: Per-agent dimension (KEY addition for causality analysis)
+    # ===========================================================================
+    rx_agent_id: str | None = None,          # which agent's PF produced this estimate
     # ===========================================================================
     # PF diagnostic fields (v2.0) for divergence/freeze/reorder detection
     # These fields enable causality analysis: Comm quality → PF accuracy → RL
@@ -410,6 +419,12 @@ def build_pf_estimate_dict(
     # Derived indicators
     info_age: float | None = None,           # t_env - last_reported_ts (s)
     silence: float | None = None,            # t_env - last_update_ts (s)
+    # ===========================================================================
+    # v2.1: Pure-predict detection (KEY for diagnosing "no meas → pure predict → error")
+    # ===========================================================================
+    pure_predict: bool = True,               # True if no meas this step (prediction only)
+    meas_count_this_step: int = 0,           # measurements ingested this step for this target
+    meas_count_total: int = 0,               # total measurements since track init
 ) -> Dict[str, Any]:
     """
     Build PF estimate dictionary for recording.
@@ -419,6 +434,11 @@ def build_pf_estimate_dict(
       - PF health indicators (neff, resampled, collapsed) for divergence detection
       - Measurement noise parameters for uncertainty quantification
       - info_age/silence for freeze/staleness detection
+
+    v2.1 adds per-agent dimension and pure-predict detection:
+      - rx_agent_id: which agent's PF (enables agent_i error → agent_i action)
+      - pure_predict: whether this step had no measurement (prediction only)
+      - meas_count_this_step/total: measurement counts for diagnostics
     """
     import math
     est_sog = math.hypot(est_vx, est_vy)
@@ -435,6 +455,10 @@ def build_pf_estimate_dict(
 
     return {
         "schema_version": PF_ESTIMATE_SCHEMA_VERSION,
+        # ===========================================================================
+        # v2.1: Per-agent dimension (KEY for causality: agent_i error → agent_i action)
+        # ===========================================================================
+        "rx_agent_id": rx_agent_id,
         "ship_id": ship_id,
         # Estimate
         "est_x": est_x,
@@ -481,4 +505,10 @@ def build_pf_estimate_dict(
         # Derived indicators
         "info_age": info_age,
         "silence": silence,
+        # ===========================================================================
+        # v2.1: Pure-predict detection
+        # ===========================================================================
+        "pure_predict": pure_predict,
+        "meas_count_this_step": meas_count_this_step,
+        "meas_count_total": meas_count_total,
     }
