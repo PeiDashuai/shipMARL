@@ -498,7 +498,7 @@ class MiniShipCallbacks(DefaultCallbacks):
             return mode.strip()
         return "train"
 
-    def _get_recorder(self, *, env_cfg: dict, worker_index: int, vector_index: int) -> StageRecorder:
+    def _get_recorder(self, *, env_cfg: dict, worker_index: int, vector_index: int) -> Optional[StageRecorder]:
         if self._staging_out_dir is None:
             # should have been set in _maybe_init_from_env_cfg; fallback
             self._staging_out_dir = os.path.abspath(env_cfg.get("out_dir", "."))
@@ -513,7 +513,8 @@ class MiniShipCallbacks(DefaultCallbacks):
             return rec
 
         if not run_uuid:
-            raise RuntimeError("Identity contract violation: env_cfg.run_uuid is empty")
+            # Skip staging if run_uuid not available (e.g., in probe/test mode)
+            return None
 
         ident = StagingIdentity(
             run_uuid=run_uuid,
@@ -560,6 +561,10 @@ class MiniShipCallbacks(DefaultCallbacks):
         # Phase2 strict: episode_uid must come from env.reset and be exposed here
         episode_uid = _get_env_episode_uid_strict(real_env, strict=self._staging_strict)
         episode.user_data["episode_uid"] = episode_uid  # keep for end
+
+        # Skip staging if no recorder (missing run_uuid)
+        if rec is None:
+            return
 
         ep_params, ep_params_src = _extract_episode_params_best_effort(real_env)
         tm_snap = _extract_trackmgr_cfg_best_effort(real_env)
@@ -821,6 +826,10 @@ class MiniShipCallbacks(DefaultCallbacks):
             vid = 0
 
         rec = self._get_recorder(env_cfg=env_cfg, worker_index=wid, vector_index=vid)
+
+        # Skip staging if no recorder (missing run_uuid in worker)
+        if rec is None:
+            return
 
         episode_uid = str(episode.user_data.get("episode_uid", "") or "")
         if self._staging_strict and not episode_uid:
