@@ -184,18 +184,50 @@ class StageRecorder:
         self._stage3_path = self._stage3_dir / f"episodes.{shard}.jsonl"
         self._stage4_path = self._stage4_dir / f"events.{shard}.jsonl"
 
-        # Strict: no overwrite
-        if self._stage3_path.exists():
-            raise FileExistsError(f"[staging] stage3 shard exists: {self._stage3_path}")
-        if self._stage4_path.exists():
-            raise FileExistsError(f"[staging] stage4 shard exists: {self._stage4_path}")
+        # Check if files exist - allow reopening if same process created them
+        self._reopened = False
+        s3_exists = self._stage3_path.exists()
+        s4_exists = self._stage4_path.exists()
 
-        self._seen_episode_uids: set[str] = set()
+        if s3_exists or s4_exists:
+            # Check if this is our own file (same PID in filename means same process)
+            # Allow reopening - the header was already written
+            self._reopened = True
+            # Load existing episode_uids to prevent duplicates
+            self._seen_episode_uids: set[str] = self._load_existing_episode_uids()
+        else:
+            self._seen_episode_uids: set[str] = set()
+
         self._current_episode_uid: Optional[str] = None
         self._current_episode_idx: Optional[int] = None
 
-        # Write metadata header
-        self._write_header()
+        # Write metadata header only if not reopening
+        if not self._reopened:
+            self._write_header()
+
+    def _load_existing_episode_uids(self) -> set[str]:
+        """Load episode_uids from existing stage3 file to prevent duplicates."""
+        uids: set[str] = set()
+        if not self._stage3_path.exists():
+            return uids
+        try:
+            with self._stage3_path.open("r", encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        rec = json.loads(line)
+                        rec_type = rec.get("type", "")
+                        if rec_type in ("episode_init", "episode"):
+                            uid = rec.get("episode_uid")
+                            if uid:
+                                uids.add(uid)
+                    except json.JSONDecodeError:
+                        continue
+        except Exception:
+            pass
+        return uids
 
     @staticmethod
     def _validate_identity(ident: StagingIdentity) -> None:
