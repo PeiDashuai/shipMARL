@@ -356,6 +356,21 @@ def build_rl_data_dict(
     }
 
 
+# ===========================================================================
+# PF Estimate Schema Version (for data contract tracking)
+# ===========================================================================
+PF_ESTIMATE_SCHEMA_VERSION = "2.0"
+
+# Schema changelog:
+#   v1.0: Basic estimate + error fields
+#   v2.0: Added PF diagnostic fields for divergence/freeze/reorder detection
+#         - Track timestamps: last_reported_ts, last_update_ts, last_arrival_ts
+#         - Last measurement: last_meas_x, last_meas_y
+#         - PF health: neff, resampled, collapsed, track_valid
+#         - Measurement noise: sigma_pos, sigma_sog, sigma_yaw, meas_age
+#         - Derived indicators: info_age, silence
+
+
 def build_pf_estimate_dict(
     ship_id: int,
     est_x: float,
@@ -371,8 +386,40 @@ def build_pf_estimate_dict(
     track_age: float = 0.0,
     num_particles: int = 0,
     eff_particles: float = 0.0,
+    # ===========================================================================
+    # PF diagnostic fields (v2.0) for divergence/freeze/reorder detection
+    # These fields enable causality analysis: Comm quality → PF accuracy → RL
+    # ===========================================================================
+    # Track timestamps
+    last_reported_ts: float | None = None,   # last ts_rep fused (message timestamp)
+    last_update_ts: float | None = None,     # last t_env fused (PF axis)
+    last_arrival_ts: float | None = None,    # last ts_arr (network arrival)
+    # Last fused measurement (projected to t_env)
+    last_meas_x: float | None = None,
+    last_meas_y: float | None = None,
+    # PF health indicators
+    neff: float | None = None,               # effective sample size after last update
+    resampled: bool | None = None,           # was resampling triggered?
+    collapsed: bool | None = None,           # did weights collapse?
+    track_valid: bool = True,                # is track within staleness threshold?
+    # Measurement noise used in last update
+    sigma_pos: float | None = None,          # position noise std (m)
+    sigma_sog: float | None = None,          # SOG noise std (m/s)
+    sigma_yaw: float | None = None,          # yaw noise std (rad)
+    meas_age: float | None = None,           # age used in last update (s)
+    # Derived indicators
+    info_age: float | None = None,           # t_env - last_reported_ts (s)
+    silence: float | None = None,            # t_env - last_update_ts (s)
 ) -> Dict[str, Any]:
-    """Build PF estimate dictionary for recording."""
+    """
+    Build PF estimate dictionary for recording.
+
+    v2.0 adds diagnostic fields for post-hoc causality analysis:
+      - Track timestamps for timing analysis
+      - PF health indicators (neff, resampled, collapsed) for divergence detection
+      - Measurement noise parameters for uncertainty quantification
+      - info_age/silence for freeze/staleness detection
+    """
     import math
     est_sog = math.hypot(est_vx, est_vy)
     true_sog = math.hypot(true_vx, true_vy)
@@ -387,23 +434,51 @@ def build_pf_estimate_dict(
         heading_error += 2 * math.pi
 
     return {
+        "schema_version": PF_ESTIMATE_SCHEMA_VERSION,
         "ship_id": ship_id,
+        # Estimate
         "est_x": est_x,
         "est_y": est_y,
         "est_vx": est_vx,
         "est_vy": est_vy,
         "est_psi": est_psi,
         "est_sog": est_sog,
+        # Truth
         "true_x": true_x,
         "true_y": true_y,
         "true_vx": true_vx,
         "true_vy": true_vy,
         "true_psi": true_psi,
         "true_sog": true_sog,
+        # Errors
         "pos_error": pos_error,
         "vel_error": vel_error,
         "heading_error": heading_error,
+        # Track quality (legacy)
         "track_age": track_age,
         "num_particles": num_particles,
         "eff_particles": eff_particles,
+        # ===========================================================================
+        # PF diagnostic fields (v2.0)
+        # ===========================================================================
+        # Track timestamps
+        "last_reported_ts": last_reported_ts,
+        "last_update_ts": last_update_ts,
+        "last_arrival_ts": last_arrival_ts,
+        # Last fused measurement
+        "last_meas_x": last_meas_x,
+        "last_meas_y": last_meas_y,
+        # PF health indicators
+        "neff": neff,
+        "resampled": resampled,
+        "collapsed": collapsed,
+        "track_valid": track_valid,
+        # Measurement noise
+        "sigma_pos": sigma_pos,
+        "sigma_sog": sigma_sog,
+        "sigma_yaw": sigma_yaw,
+        "meas_age": meas_age,
+        # Derived indicators
+        "info_age": info_age,
+        "silence": silence,
     }

@@ -1077,13 +1077,30 @@ class AISCommsSim:
         self.age_samples: List[float] = []
         self.age_minus_delay_samples = []
 
-        # --- Per-ship metrics (for diagnostic analysis) ---
-        # tx_ship -> list of delay/age samples
-        self._per_ship_delay: Dict[int, List[float]] = {}
-        self._per_ship_age: Dict[int, List[float]] = {}
-        self._per_ship_rx_count: Dict[int, int] = {}
+        # ===========================================================================
+        # Per-ship metrics (aggregated at event source, not reconstructed)
+        # These are accumulated at TX/drop/deliver points in the simulation loop.
+        # ===========================================================================
+        # tx_ship -> counters and samples
+        self._per_ship_tx_count: Dict[int, int] = {}    # TX attempts by this ship
+        self._per_ship_drop_count: Dict[int, int] = {}  # Drops of this ship's messages
+        self._per_ship_rx_count: Dict[int, int] = {}    # Delivered messages from this ship
+        self._per_ship_reorder_count: Dict[int, int] = {}  # Reordered messages from this ship
+        self._per_ship_delay: Dict[int, List[float]] = {}  # Delay samples
+        self._per_ship_age: Dict[int, List[float]] = {}    # Age samples
         # Last RX info per ship (for PF error attribution)
         self._last_rx_by_ship: Dict[int, Dict[str, float]] = {}
+
+        # ===========================================================================
+        # Per-link metrics (rx_agent, tx_ship) -> counters
+        # Captures "same target, different receiver" quality differences.
+        # ===========================================================================
+        self._per_link_tx_count: Dict[Tuple[str, int], int] = {}
+        self._per_link_drop_count: Dict[Tuple[str, int], int] = {}
+        self._per_link_rx_count: Dict[Tuple[str, int], int] = {}
+        self._per_link_delay: Dict[Tuple[str, int], List[float]] = {}
+        self._per_link_age: Dict[Tuple[str, int], List[float]] = {}
+        self._per_link_reorder_count: Dict[Tuple[str, int], int] = {}
 
         self._link_samples = []
         self._ar1_samples = []
@@ -1126,37 +1143,79 @@ class AISCommsSim:
         return float(np.mean(vals)) if vals else 0.0
 
     # =============================================================================
-    # Stage-3 Metrics Schema (DO NOT RENAME without updating stage3 writers)
+    # Stage-3 Metrics Schema — LOCKED CONTRACT v2.0
+    # =============================================================================
+    # Schema Version: COMM_STATS_SCHEMA_VERSION
+    # DO NOT RENAME fields without incrementing schema version!
     #
-    # This schema is consumed by:
+    # This schema is the SINGLE SOURCE OF TRUTH consumed by:
     #   - MiniShipAISCommsEnv Stage-3 comm_stats writer (per-step, per-agent)
     #   - AISCommsSim.export_csv() timeseries dump
+    #   - staging/validate.py schema validation
+    #   - causality_analysis.py data loading
     #
-    # Canonical (Stage-3) keys returned by metrics_snapshot():
-    #   Counters:
-    #     tx_attempts, passed, dropped, delivered
-    #   Ratios:
-    #     ppr (passed/attempts), pdr (delivered/attempts)
-    #   Delay/Age (seconds):
-    #     delay_avg, delay_p95, age_avg, age_p95
-    #   Channel state:
-    #     bad_occupancy (avg GE bad-state occupancy across links)
-    #   Age-Delay gap (seconds):
-    #     age_delay_gap_avg, age_delay_gap_p95
-    #   Reordering:
-    #     reorder_rate
+    # Canonical field names returned by metrics_snapshot():
+    # ─────────────────────────────────────────────────────────────────────────────
+    # Field                  Type   Unit    Description
+    # ─────────────────────────────────────────────────────────────────────────────
+    # schema_version         str    -       Schema version (e.g., "2.0")
     #
-    # The Stage-3 comm_stats file only requires the subset below:
-    #   ppr, pdr, delay_avg, age_avg, bad_occupancy, delay_p95, age_p95,
-    #   age_delay_gap_avg, age_delay_gap_p95
+    # Counters (cumulative since reset):
+    # tx_attempts            int    -       Total TX attempts (link-level)
+    # passed                 int    -       Passed GE channel
+    # dropped                int    -       Dropped by GE channel
+    # delivered              int    -       Successfully delivered to queue
+    #
+    # Ratios (derived):
+    # ppr                    float  -       Pass rate (passed/attempts)
+    # pdr                    float  -       Delivery rate (delivered/attempts)
+    #
+    # Delay/Age (seconds, cumulative samples):
+    # delay_mean             float  s       Mean network delay
+    # delay_p95              float  s       95th percentile delay
+    # delay_max              float  s       Maximum delay
+    # age_mean               float  s       Mean message age (arrival - reported)
+    # age_p95                float  s       95th percentile age
+    # age_max                float  s       Maximum age
+    #
+    # Channel state:
+    # bad_occupancy          float  -       Avg GE bad-state occupancy (0-1)
+    #
+    # Age-Delay gap (clock offset diagnostic):
+    # age_delay_gap_mean     float  s       Mean(age - delay), clock offset indicator
+    # age_delay_gap_p95      float  s       95th percentile gap
+    #
+    # Reordering:
+    # reorder_count          int    -       Total reordered messages
+    # reorder_rate           float  -       Reorder rate (count/total)
+    # ─────────────────────────────────────────────────────────────────────────────
+    #
+    # MIGRATION NOTES (v1.x → v2.0):
+    #   - delay_avg → delay_mean (renamed for consistency)
+    #   - age_avg → age_mean (renamed for consistency)
+    #   - age_delay_gap_avg → age_delay_gap_mean (renamed for consistency)
+    #   - Added schema_version field
+    #   - Legacy aliases (delay_avg, age_avg) retained for backward compat
     # =============================================================================
+    COMM_STATS_SCHEMA_VERSION = "2.0"
+
+    # Canonical keys for stage3 (subset for per-step records)
     STAGE3_COMM_METRICS_KEYS = [
+        "schema_version",
         "ppr", "pdr",
-        "delay_avg", "age_avg",
+        "delay_mean", "age_mean",
         "bad_occupancy",
         "delay_p95", "age_p95",
-        "age_delay_gap_avg", "age_delay_gap_p95",
+        "age_delay_gap_mean", "age_delay_gap_p95",
+        "reorder_rate",
     ]
+
+    # Legacy aliases (for backward compat with v1.x consumers)
+    STAGE3_COMM_LEGACY_ALIASES = {
+        "delay_avg": "delay_mean",
+        "age_avg": "age_mean",
+        "age_delay_gap_avg": "age_delay_gap_mean",
+    }
 
     def metrics_snapshot(self) -> Dict[str, float]:
         """
@@ -1182,16 +1241,17 @@ class AISCommsSim:
         def _p95(arr) -> float:
             return float(_np.percentile(arr, 95)) if arr else 0.0
 
-        delay_avg = float(_np.mean(self.delay_samples)) if self.delay_samples else 0.0
+        # Canonical field names (v2.0 schema)
+        delay_mean = float(_np.mean(self.delay_samples)) if self.delay_samples else 0.0
         delay_p95 = _p95(self.delay_samples)
         delay_max = float(max(self.delay_samples)) if self.delay_samples else 0.0
 
-        age_avg = float(_np.mean(self.age_samples)) if self.age_samples else 0.0
+        age_mean = float(_np.mean(self.age_samples)) if self.age_samples else 0.0
         age_p95 = _p95(self.age_samples)
         age_max = float(max(self.age_samples)) if self.age_samples else 0.0
 
-        # Age-Delay gap (clock offset effect); keep signed statistic as in your existing pipeline
-        age_delay_gap_avg = float(_np.mean(self.age_minus_delay_samples)) if self.age_minus_delay_samples else 0.0
+        # Age-Delay gap (clock offset effect); keep signed statistic
+        age_delay_gap_mean = float(_np.mean(self.age_minus_delay_samples)) if self.age_minus_delay_samples else 0.0
         age_delay_gap_p95 = _p95(self.age_minus_delay_samples)
 
         # ratios
@@ -1214,53 +1274,77 @@ class AISCommsSim:
         self._metrics.ppr = ppr
         self._metrics.pdr = pdr
 
-        self._metrics.delay_avg = delay_avg
+        # Use canonical names + legacy aliases
+        self._metrics.delay_mean = delay_mean
+        self._metrics.delay_avg = delay_mean  # Legacy alias
         self._metrics.delay_p95 = delay_p95
         self._metrics.delay_max = delay_max
 
-        self._metrics.age_avg = age_avg
+        self._metrics.age_mean = age_mean
+        self._metrics.age_avg = age_mean  # Legacy alias
         self._metrics.age_p95 = age_p95
         self._metrics.age_max = age_max
 
         self._metrics.bad_occupancy = bad_occupancy
-        self._metrics.age_delay_gap_avg = age_delay_gap_avg
+        self._metrics.age_delay_gap_mean = age_delay_gap_mean
+        self._metrics.age_delay_gap_avg = age_delay_gap_mean  # Legacy alias
         self._metrics.age_delay_gap_p95 = age_delay_gap_p95
 
         self._metrics.reorder_count = reorder_count
         self._metrics.reorder_rate = reorder_rate
 
-        # Optional: keep the “total” aliases used by stage3_flush_episode (same meaning in your current code)
+        # Optional: keep the "total" aliases used by stage3_flush_episode
         self._metrics.tx_total = tx
         self._metrics.rx_delivered_total = dv
         self._metrics.rx_late_total = int(getattr(self._metrics, "rx_late_total", 0))
         self._metrics.rx_ooo_total = reorder_count
         self._metrics.rx_dropped_total = dr
 
-        # -------- return snapshot dict (keep your existing keys + stage3 CSV keys) --------
+        # -------- return snapshot dict --------
+        # Canonical v2.0 schema with legacy aliases for backward compat
         snap = {
-            # canonical keys
+            # Schema version (always include for validation)
+            "schema_version": self.COMM_STATS_SCHEMA_VERSION,
+
+            # Counters
+            "tx_attempts": tx,
+            "passed": pa,
+            "dropped": dr,
+            "delivered": dv,
+
+            # Ratios
             "ppr": ppr,
             "pdr": pdr,
-            "delay_avg": delay_avg,
+
+            # Delay/Age (canonical v2.0 names)
+            "delay_mean": delay_mean,
             "delay_p95": delay_p95,
             "delay_max": delay_max,
-            "age_avg": age_avg,
+            "age_mean": age_mean,
             "age_p95": age_p95,
             "age_max": age_max,
-            "reorder_count": reorder_count,
-            "reorder_rate": reorder_rate,
+
+            # Channel state
             "bad_occupancy": bad_occupancy,
-            "age_delay_gap_avg": age_delay_gap_avg,
+
+            # Age-Delay gap
+            "age_delay_gap_mean": age_delay_gap_mean,
             "age_delay_gap_p95": age_delay_gap_p95,
 
-            # stage3 / CSV fields (explicit mapping)
-            "pass_rate": ppr,
-            "drop_rate": float(dr / tx) if tx > 0 else 0.0,
-            "deliver_rate": pdr,
-            "delay_mean_s": delay_avg,
+            # Reordering
+            "reorder_count": reorder_count,
+            "reorder_rate": reorder_rate,
+
+            # ===== Legacy aliases (v1.x backward compat) =====
+            "delay_avg": delay_mean,
+            "age_avg": age_mean,
+            "age_delay_gap_avg": age_delay_gap_mean,
+
+            # Legacy suffixed variants
+            "delay_mean_s": delay_mean,
             "delay_p95_s": delay_p95,
             "delay_max_s": delay_max,
-            "age_mean_s": age_avg,
+            "age_mean_s": age_mean,
             "age_p95_s": age_p95,
             "age_max_s": age_max,
         }
@@ -1300,8 +1384,23 @@ class AISCommsSim:
             ages = self._per_ship_age.get(sid, [])
             last_rx = self._last_rx_by_ship.get(sid, {})
 
+            tx_cnt = self._per_ship_tx_count.get(sid, 0)
+            rx_cnt = self._per_ship_rx_count.get(sid, 0)
+            drop_cnt = self._per_ship_drop_count.get(sid, 0)
+            reorder_cnt = self._per_ship_reorder_count.get(sid, 0)
+
             result[sid] = {
-                "rx_count": self._per_ship_rx_count.get(sid, 0),
+                # Counters (accumulated at event source)
+                "tx_count": tx_cnt,
+                "rx_count": rx_cnt,
+                "drop_count": drop_cnt,
+                "reorder_count": reorder_cnt,
+                # Derived ratios
+                "ppr": float(rx_cnt + drop_cnt) / tx_cnt if tx_cnt > 0 else 0.0,  # passed / attempted
+                "pdr": float(rx_cnt) / tx_cnt if tx_cnt > 0 else 0.0,  # delivered / attempted
+                "drop_rate": float(drop_cnt) / tx_cnt if tx_cnt > 0 else 0.0,
+                "reorder_rate": float(reorder_cnt) / rx_cnt if rx_cnt > 0 else 0.0,
+                # Delay/Age stats
                 "delay_mean": float(np.mean(delays)) if delays else 0.0,
                 "delay_p95": _p95(delays),
                 "delay_max": float(max(delays)) if delays else 0.0,
@@ -1313,6 +1412,69 @@ class AISCommsSim:
                 "last_rx_age_s": last_rx.get("last_rx_age_s", 0.0),
                 "last_rx_report_ts": last_rx.get("last_rx_report_ts", 0.0),
                 "last_rx_arrival_ts": last_rx.get("last_rx_arrival_ts", 0.0),
+            }
+
+        return result
+
+    def get_per_link_metrics(self) -> Dict[Tuple[str, int], Dict[str, Any]]:
+        """
+        Per-link (rx_agent, tx_ship) communication metrics.
+
+        Enables analyzing "same target, different receiver" quality differences.
+        This is critical for understanding why one agent's PF tracks well while
+        another agent's PF diverges on the same target.
+
+        Returns:
+            Dict[(rx_agent, tx_ship), {
+                "tx_count": int,          # TX attempts on this link
+                "rx_count": int,          # Delivered messages on this link
+                "drop_count": int,        # Dropped messages on this link
+                "reorder_count": int,     # Reordered messages on this link
+                "ppr": float,             # Pass rate
+                "pdr": float,             # Delivery rate
+                "delay_mean": float,
+                "delay_p95": float,
+                "age_mean": float,
+                "age_p95": float,
+            }]
+        """
+        import numpy as np
+
+        def _p95(arr) -> float:
+            return float(np.percentile(arr, 95)) if len(arr) >= 2 else (float(max(arr)) if arr else 0.0)
+
+        result = {}
+        # Collect all link keys
+        all_keys = set(self._per_link_tx_count.keys()) | set(self._per_link_rx_count.keys())
+
+        for link_key in all_keys:
+            rx_agent, tx_sid = link_key
+            delays = self._per_link_delay.get(link_key, [])
+            ages = self._per_link_age.get(link_key, [])
+
+            tx_cnt = self._per_link_tx_count.get(link_key, 0)
+            rx_cnt = self._per_link_rx_count.get(link_key, 0)
+            drop_cnt = self._per_link_drop_count.get(link_key, 0)
+            reorder_cnt = self._per_link_reorder_count.get(link_key, 0)
+
+            result[link_key] = {
+                "rx_agent": rx_agent,
+                "tx_ship": tx_sid,
+                # Counters
+                "tx_count": tx_cnt,
+                "rx_count": rx_cnt,
+                "drop_count": drop_cnt,
+                "reorder_count": reorder_cnt,
+                # Ratios
+                "ppr": float(rx_cnt + drop_cnt) / tx_cnt if tx_cnt > 0 else 0.0,
+                "pdr": float(rx_cnt) / tx_cnt if tx_cnt > 0 else 0.0,
+                "drop_rate": float(drop_cnt) / tx_cnt if tx_cnt > 0 else 0.0,
+                "reorder_rate": float(reorder_cnt) / rx_cnt if rx_cnt > 0 else 0.0,
+                # Delay/Age
+                "delay_mean": float(np.mean(delays)) if delays else 0.0,
+                "delay_p95": _p95(delays),
+                "age_mean": float(np.mean(ages)) if ages else 0.0,
+                "age_p95": _p95(ages),
             }
 
         return result
@@ -1954,6 +2116,14 @@ class AISCommsSim:
                 for rx in self._rx_list(sid):
                     self._link_attempts += 1
 
+                    # Per-ship TX counting (at event source)
+                    tx_sid = int(sid)
+                    self._per_ship_tx_count[tx_sid] = self._per_ship_tx_count.get(tx_sid, 0) + 1
+
+                    # Per-link TX counting (rx_agent, tx_ship)
+                    link_stat_key = (str(rx), tx_sid)
+                    self._per_link_tx_count[link_stat_key] = self._per_link_tx_count.get(link_stat_key, 0) + 1
+
                     link_key = (int(sid), str(rx))
                     ch = self._get_link_channel(link_key)
 
@@ -2000,6 +2170,9 @@ class AISCommsSim:
 
                     if not passed:
                         self._link_dropped += 1
+                        # Per-ship/per-link drop counting
+                        self._per_ship_drop_count[tx_sid] = self._per_ship_drop_count.get(tx_sid, 0) + 1
+                        self._per_link_drop_count[link_stat_key] = self._per_link_drop_count.get(link_stat_key, 0) + 1
                         continue
                     self._link_passed += 1
 
@@ -2014,6 +2187,9 @@ class AISCommsSim:
                     self._reorder_total += 1
                     if is_reordered:
                         self._reorder_hit += 1
+                        # Per-ship/per-link reorder counting
+                        self._per_ship_reorder_count[tx_sid] = self._per_ship_reorder_count.get(tx_sid, 0) + 1
+                        self._per_link_reorder_count[link_stat_key] = self._per_link_reorder_count.get(link_stat_key, 0) + 1
 
                     if self.cfg.get("logging", {}).get("export_reorder_samples", False):
                         self._reorder_samples.append(dict(
@@ -2050,15 +2226,17 @@ class AISCommsSim:
                     amd = float(age - net_delay)
                     self.age_minus_delay_samples.append(amd)
 
-                    # Per-ship tracking (for diagnostic analysis)
-                    tx_sid = int(sid)
+                    # ===========================================================
+                    # Per-ship tracking (at event source: deliver)
+                    # ===========================================================
+                    # Note: tx_sid and link_stat_key already defined above at TX
                     if tx_sid not in self._per_ship_delay:
                         self._per_ship_delay[tx_sid] = []
                         self._per_ship_age[tx_sid] = []
-                        self._per_ship_rx_count[tx_sid] = 0
                     self._per_ship_delay[tx_sid].append(net_delay)
                     self._per_ship_age[tx_sid].append(age)
-                    self._per_ship_rx_count[tx_sid] += 1
+                    self._per_ship_rx_count[tx_sid] = self._per_ship_rx_count.get(tx_sid, 0) + 1
+
                     # Last RX info for this ship (useful for PF error attribution)
                     self._last_rx_by_ship[tx_sid] = {
                         "last_rx_delay_s": float(net_delay),
@@ -2066,6 +2244,16 @@ class AISCommsSim:
                         "last_rx_report_ts": float(reported_ts),
                         "last_rx_arrival_ts": float(at),
                     }
+
+                    # ===========================================================
+                    # Per-link tracking (rx_agent, tx_ship)
+                    # ===========================================================
+                    self._per_link_rx_count[link_stat_key] = self._per_link_rx_count.get(link_stat_key, 0) + 1
+                    if link_stat_key not in self._per_link_delay:
+                        self._per_link_delay[link_stat_key] = []
+                        self._per_link_age[link_stat_key] = []
+                    self._per_link_delay[link_stat_key].append(net_delay)
+                    self._per_link_age[link_stat_key].append(age)
 
                     if self.cfg.get("logging", {}).get("export_link_samples", False):
                         off, dppm = self.clock_of_ship.get(sid, (0.0, 0.0))

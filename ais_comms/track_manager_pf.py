@@ -2815,6 +2815,62 @@ class AISTrackManagerPF:
                 heading_error = 0.0
                 track_age = 0.0
 
+            # ---------------------------------------------------------------------------
+            # PF diagnostic fields for divergence/freeze/reorder detection
+            # These fields enable post-hoc causality analysis: Comm → PF → RL
+            # ---------------------------------------------------------------------------
+            pf_diag = {
+                # Track timestamps (from PFTrack)
+                "last_reported_ts": None,      # last ts_rep fused (message timestamp)
+                "last_update_ts": None,        # last t_env fused (PF axis)
+                "last_arrival_ts": None,       # last ts_arr (metadata)
+                "last_meas_x": None,           # last fused x (projected to t_env)
+                "last_meas_y": None,           # last fused y (projected to t_env)
+                "track_valid": True,           # staleness validity
+                # PF update stats (from pf.last_update_stats)
+                "neff": None,                  # effective sample size after last update
+                "resampled": None,             # was resampling triggered?
+                "collapsed": None,             # did weights collapse?
+                "sigma_pos": None,             # measurement noise std for position
+                "sigma_sog": None,             # measurement noise std for SOG
+                "sigma_yaw": None,             # measurement noise std for yaw
+                "meas_age": None,              # age used in last update
+                # Derived indicators
+                "info_age": None,              # t_env - last_reported_ts
+                "silence": None,               # t_env - last_update_ts
+            }
+
+            # Extract diagnostic fields if estimate was found
+            if est_found and tr is not None:
+                # Track timestamps
+                pf_diag["last_reported_ts"] = getattr(tr, "last_reported_ts", None)
+                pf_diag["last_update_ts"] = getattr(tr, "last_update_ts", None)
+                pf_diag["last_arrival_ts"] = getattr(tr, "last_arrival_ts", None)
+                pf_diag["last_meas_x"] = getattr(tr, "last_meas_x", None)
+                pf_diag["last_meas_y"] = getattr(tr, "last_meas_y", None)
+                pf_diag["track_valid"] = getattr(tr, "valid", True)
+
+                # PF update stats
+                pf = tr.pf
+                if pf is not None:
+                    stats = getattr(pf, "last_update_stats", {})
+                    if isinstance(stats, dict):
+                        pf_diag["neff"] = stats.get("neff", None)
+                        pf_diag["resampled"] = stats.get("resampled", None)
+                        pf_diag["collapsed"] = stats.get("collapsed", None)
+                        pf_diag["sigma_pos"] = stats.get("sigma_pos", None)
+                        pf_diag["sigma_sog"] = stats.get("sigma_sog", None)
+                        pf_diag["sigma_yaw"] = stats.get("sigma_yaw", None)
+                        pf_diag["meas_age"] = stats.get("age", None)
+
+                # Derived indicators
+                last_rep = pf_diag["last_reported_ts"]
+                last_upd = pf_diag["last_update_ts"]
+                if last_rep is not None:
+                    pf_diag["info_age"] = max(0.0, t_env - float(last_rep))
+                if last_upd is not None:
+                    pf_diag["silence"] = max(0.0, t_env - float(last_upd))
+
             results.append({
                 "ship_id": sid,
                 "est_found": est_found,
@@ -2836,6 +2892,8 @@ class AISTrackManagerPF:
                 "track_age": track_age if track_age != float("inf") else -1.0,
                 "num_particles": num_particles,
                 "eff_particles": eff_particles,
+                # PF diagnostic fields (new)
+                **pf_diag,
             })
 
         return results
