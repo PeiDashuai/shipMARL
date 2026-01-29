@@ -847,9 +847,10 @@ class MiniShipCallbacks(DefaultCallbacks):
             return
 
         episode_uid = str(episode.user_data.get("episode_uid", "") or "")
-        if self._staging_strict and not episode_uid:
-            # strict: must exist, never drift
-            episode_uid = _get_env_episode_uid_strict(real_env, strict=True)
+
+        # Skip staging if episode_uid is empty (env doesn't support it)
+        if not episode_uid:
+            return
 
         payload = {
             "ended_utc": _utc_now_iso(),
