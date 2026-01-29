@@ -829,4 +829,234 @@ class MiniShipCallbacks(DefaultCallbacks):
                 "policy_shaped_reward": float(episode.custom_metrics.get("policy_shaped_reward", 0.0) or 0.0),
             },
             "constraints": {
-                "c_near": float(episode.custom_metrics.get
+                "c_near": float(episode.custom_metrics.get("c_near", 0.0) or 0.0),
+                "c_rule": float(episode.custom_metrics.get("c_rule", 0.0) or 0.0),
+            },
+            "dual": {
+                "lam_near": float(self.lam["near"]),
+                "lam_rule": float(self.lam["rule"]),
+                "dual_version": int(self._dual_version),
+            },
+        }
+
+        rec.emit_stage4_ep(
+            episode_uid=episode_uid,
+            episode_idx=int(getattr(episode, "episode_id", -1) or -1),
+            payload=payload,
+        )
+
+    def on_train_result(self, *, algorithm, result, **kwargs):
+        """
+        Dual variable update after each training iteration.
+        """
+        if self._dual_frozen or self.dual_freeze:
+            return
+
+        # Get episode stats from result
+        ep_succ = result.get("custom_metrics", {}).get("succ_ep_bin_mean", 0.0) or 0.0
+        ep_coll = result.get("custom_metrics", {}).get("coll_ep_bin_mean", 0.0) or 0.0
+        ep_tout = result.get("custom_metrics", {}).get("tout_ep_bin_mean", 0.0) or 0.0
+
+        c_near = result.get("custom_metrics", {}).get("c_near_mean", 0.0) or 0.0
+        c_rule = result.get("custom_metrics", {}).get("c_rule_mean", 0.0) or 0.0
+
+        # Update running estimates
+        self.running_c["near"] = self.dual_beta * self.running_c["near"] + (1 - self.dual_beta) * c_near
+        self.running_c["rule"] = self.dual_beta * self.running_c["rule"] + (1 - self.dual_beta) * c_rule
+
+        # Dual update (only every N iterations)
+        iter_num = result.get("training_iteration", 0)
+        if iter_num % self.dual_update_every == 0 and self.use_lagrangian:
+            for k in self.lam.keys():
+                grad = self.running_c[k] - self.ctarget[k]
+                self.lam[k] = max(0.0, min(self.lam_max[k], self.lam[k] + self.dual_eta[k] * grad))
+            self._dual_version += 1
+
+        # Auto freeze check
+        if self.dual_freeze_on_success:
+            if ep_succ >= self.dual_freeze_succ and ep_coll <= self.dual_freeze_coll and ep_tout <= self.dual_freeze_tout:
+                self._dual_freeze_hits += 1
+                if self._dual_freeze_hits >= self.dual_freeze_patience:
+                    self._dual_frozen = True
+                    print(f"[shipMARL][Dual] Frozen at iter {iter_num}: succ={ep_succ:.3f} coll={ep_coll:.3f}")
+            else:
+                self._dual_freeze_hits = 0
+
+
+# ===================== Main training function =====================
+def build_ppo_config(args, run_uuid: str) -> PPOConfig:
+    """Build PPO configuration for MiniShip training."""
+
+    # Register environment and model
+    register_miniship_env()
+    register_miniship_gnn_lstm_model()
+
+    env_cfg = {
+        "N": args.N,
+        "dt": args.dt,
+        "T_max": args.T_max,
+        "use_lagrangian": args.use_lagrangian,
+        "use_guard": args.use_guard,
+        "use_ais_obs": args.use_ais_obs,
+        "ais_cfg_path": args.ais_cfg_path,
+        "mode": "train",
+        "out_dir": args.out_dir,
+        "run_uuid": run_uuid,
+        "staging_enable": args.staging_enable,
+        "staging_record_steps": args.staging_record_steps,
+        "staging_record_pf": args.staging_record_pf,
+        "staging": {
+            "out_dir": args.out_dir,
+            "strict": True,
+        },
+    }
+
+    config = (
+        PPOConfig()
+        .environment(
+            env="miniship_ais_comms",
+            env_config=env_cfg,
+        )
+        .framework("torch")
+        .training(
+            lr=args.lr,
+            train_batch_size=args.train_batch_size,
+            sgd_minibatch_size=args.sgd_minibatch_size,
+            num_sgd_iter=args.num_sgd_iter,
+            entropy_coeff=args.entropy_coeff,
+            gamma=0.99,
+            lambda_=0.95,
+            clip_param=0.2,
+            vf_clip_param=10.0,
+        )
+        .rollouts(
+            num_rollout_workers=args.num_workers,
+            num_envs_per_worker=args.num_envs_per_worker,
+            rollout_fragment_length="auto",
+        )
+        .callbacks(MiniShipCallbacks)
+        .multi_agent(
+            policies={
+                "shared_policy": PolicySpec(),
+            },
+            policy_mapping_fn=lambda agent_id, episode, worker, **kwargs: "shared_policy",
+        )
+    )
+
+    if args.model == "gnn_lstm":
+        config = config.training(
+            model={
+                "custom_model": "miniship_gnn_lstm",
+                "custom_model_config": {
+                    "gnn_hidden": 64,
+                    "lstm_hidden": 128,
+                    "num_gnn_layers": 2,
+                },
+            }
+        )
+
+    return config
+
+
+def main():
+    parser = argparse.ArgumentParser(description="Train PPO on MiniShip with AIS/PF")
+
+    # Environment
+    parser.add_argument("--N", type=int, default=2, help="Number of ships")
+    parser.add_argument("--dt", type=float, default=0.5, help="Simulation timestep")
+    parser.add_argument("--T_max", type=float, default=100.0, help="Max episode time")
+    parser.add_argument("--use-lagrangian", action="store_true", help="Use Lagrangian reward shaping")
+    parser.add_argument("--use-guard", action="store_true", help="Use safety guard")
+    parser.add_argument("--use-ais-obs", action="store_true", help="Use AIS observations")
+    parser.add_argument("--ais-cfg-path", default="ais_comms/ais_config_pf.yaml", help="AIS config path")
+
+    # Training
+    parser.add_argument("--lr", type=float, default=3e-4, help="Learning rate")
+    parser.add_argument("--train-batch-size", type=int, default=4000, help="Train batch size")
+    parser.add_argument("--sgd-minibatch-size", type=int, default=256, help="SGD minibatch size")
+    parser.add_argument("--num-sgd-iter", type=int, default=10, help="Number of SGD iterations")
+    parser.add_argument("--entropy-coeff", type=float, default=0.01, help="Entropy coefficient")
+    parser.add_argument("--num-workers", type=int, default=4, help="Number of rollout workers")
+    parser.add_argument("--num-envs-per-worker", type=int, default=2, help="Envs per worker")
+    parser.add_argument("--model", default="gnn_lstm", choices=["gnn_lstm", "mlp"], help="Model type")
+
+    # Staging
+    parser.add_argument("--out-dir", default="training_output", help="Output directory")
+    parser.add_argument("--staging-enable", action="store_true", help="Enable staging recording")
+    parser.add_argument("--staging-record-steps", action="store_true", help="Record step-level data")
+    parser.add_argument("--staging-record-pf", action="store_true", help="Record PF estimates")
+
+    # Run control
+    parser.add_argument("--iterations", type=int, default=100, help="Training iterations")
+    parser.add_argument("--checkpoint-freq", type=int, default=10, help="Checkpoint frequency")
+    parser.add_argument("--resume", default=None, help="Resume from checkpoint")
+
+    args = parser.parse_args()
+
+    # Initialize Ray
+    ray.init(ignore_reinit_error=True)
+
+    run_uuid = _new_run_uuid()
+    print(f"[shipMARL] Starting run: {run_uuid}")
+    print(f"[shipMARL] Output: {args.out_dir}")
+
+    # Create output directory
+    os.makedirs(args.out_dir, exist_ok=True)
+
+    # Save run config
+    run_cfg = {
+        "run_uuid": run_uuid,
+        "started_utc": _utc_now_iso(),
+        "args": vars(args),
+        "git": _try_get_git_state(os.getcwd()),
+        "packages": _try_get_pkg_versions(["ray", "torch", "numpy", "gymnasium"]),
+        "host": {
+            "hostname": socket.gethostname(),
+            "user": getpass.getuser(),
+            "platform": platform.platform(),
+            "python": sys.version,
+        },
+    }
+    _atomic_write_json(os.path.join(args.out_dir, "run_config.json"), run_cfg)
+
+    # Build and train
+    config = build_ppo_config(args, run_uuid)
+    algo = config.build()
+
+    if args.resume:
+        print(f"[shipMARL] Resuming from: {args.resume}")
+        algo.restore(args.resume)
+
+    best_reward = float("-inf")
+
+    for i in range(1, args.iterations + 1):
+        result = algo.train()
+
+        ep_reward = result.get("episode_reward_mean", 0.0) or 0.0
+        succ_rate = result.get("custom_metrics", {}).get("succ_ep_bin_mean", 0.0) or 0.0
+        coll_rate = result.get("custom_metrics", {}).get("coll_ep_bin_mean", 0.0) or 0.0
+
+        print(f"[iter {i:4d}] reward={ep_reward:+.2f} succ={succ_rate:.2%} coll={coll_rate:.2%}")
+
+        # Checkpoint
+        if i % args.checkpoint_freq == 0:
+            ckpt = algo.save(os.path.join(args.out_dir, "checkpoints"))
+            print(f"[shipMARL] Checkpoint saved: {ckpt}")
+
+        # Best model
+        if ep_reward > best_reward:
+            best_reward = ep_reward
+            algo.save(os.path.join(args.out_dir, "best"))
+
+    # Final save
+    final_ckpt = algo.save(os.path.join(args.out_dir, "final"))
+    print(f"[shipMARL] Training complete. Final checkpoint: {final_ckpt}")
+
+    algo.stop()
+    ray.shutdown()
+
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
