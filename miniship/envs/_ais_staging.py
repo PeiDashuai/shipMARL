@@ -265,6 +265,139 @@ class StagingSink:
             goal=goal,
         )
 
+    # =========================================================================
+    # Stage-4 risk/behavior events (for case-driven analysis)
+    # =========================================================================
+
+    def emit_stage4_near_miss(
+        self,
+        ep: EpisodeIdentity,
+        t: float,
+        step_idx: int,
+        ship_pair: tuple[int, int],
+        cpa_distance: float,
+        tcpa: float,
+        positions: Dict[int, tuple[float, float]],
+    ) -> None:
+        """Near-miss event (CPA below threshold but no collision)."""
+        self.rec.emit_stage4_event(
+            stage3_episode_uid=ep.episode_uid,
+            stage3_episode_idx=ep.episode_idx,
+            event="near_miss",
+            payload={
+                "t": t,
+                "step_idx": step_idx,
+                "ship_pair": list(ship_pair),
+                "cpa_distance": cpa_distance,
+                "tcpa": tcpa,
+                "positions": {str(k): list(v) for k, v in positions.items()},
+            },
+        )
+
+    def emit_stage4_guard_trigger(
+        self,
+        ep: EpisodeIdentity,
+        t: float,
+        step_idx: int,
+        agent_id: str,
+        guard_margin: float,
+        action_override: bool,
+        original_action: List[float] | None = None,
+        override_action: List[float] | None = None,
+    ) -> None:
+        """Safety guard trigger event."""
+        self.rec.emit_stage4_event(
+            stage3_episode_uid=ep.episode_uid,
+            stage3_episode_idx=ep.episode_idx,
+            event="guard_trigger",
+            payload={
+                "t": t,
+                "step_idx": step_idx,
+                "agent_id": agent_id,
+                "guard_margin": guard_margin,
+                "action_override": action_override,
+                "original_action": original_action,
+                "override_action": override_action,
+            },
+        )
+
+    def emit_stage4_rule_violation(
+        self,
+        ep: EpisodeIdentity,
+        t: float,
+        step_idx: int,
+        agent_id: str,
+        rule_type: str,
+        c_rule: float,
+        details: Dict[str, Any] | None = None,
+    ) -> None:
+        """COLREG rule violation event."""
+        self.rec.emit_stage4_event(
+            stage3_episode_uid=ep.episode_uid,
+            stage3_episode_idx=ep.episode_idx,
+            event="rule_violation",
+            payload={
+                "t": t,
+                "step_idx": step_idx,
+                "agent_id": agent_id,
+                "rule_type": rule_type,
+                "c_rule": c_rule,
+                "details": details or {},
+            },
+        )
+
+    def emit_stage4_cost_spike(
+        self,
+        ep: EpisodeIdentity,
+        t: float,
+        step_idx: int,
+        agent_id: str,
+        cost_type: str,
+        cost_value: float,
+        threshold: float,
+    ) -> None:
+        """Cost spike event (cost exceeds threshold)."""
+        self.rec.emit_stage4_event(
+            stage3_episode_uid=ep.episode_uid,
+            stage3_episode_idx=ep.episode_idx,
+            event="cost_spike",
+            payload={
+                "t": t,
+                "step_idx": step_idx,
+                "agent_id": agent_id,
+                "cost_type": cost_type,
+                "cost_value": cost_value,
+                "threshold": threshold,
+            },
+        )
+
+    def emit_stage4_pf_relock(
+        self,
+        ep: EpisodeIdentity,
+        t: float,
+        step_idx: int,
+        agent_id: str,
+        target_ship_id: int,
+        relock_type: str,  # "soft_relock", "hard_relock", "track_lost"
+        pos_error_before: float | None = None,
+        details: Dict[str, Any] | None = None,
+    ) -> None:
+        """PF relock/track-loss event."""
+        self.rec.emit_stage4_event(
+            stage3_episode_uid=ep.episode_uid,
+            stage3_episode_idx=ep.episode_idx,
+            event="pf_relock",
+            payload={
+                "t": t,
+                "step_idx": step_idx,
+                "agent_id": agent_id,
+                "target_ship_id": target_ship_id,
+                "relock_type": relock_type,
+                "pos_error_before": pos_error_before,
+                "details": details or {},
+            },
+        )
+
 
 # Helper functions for building record data
 def build_ship_state_dict(

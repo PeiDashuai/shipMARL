@@ -132,6 +132,10 @@ class MiniShipAISCommsEnv:
         self._ep_cost_sum: Dict[str, float] = {}  # near, rule, coll, time
         self._ep_pf_errors: List[Dict[str, float]] = []  # per-step PF errors
 
+        # Per-step delta tracking for comm stats (cumulative → delta conversion)
+        self._prev_per_ship_comm: Dict[int, Dict[str, Any]] = {}
+        self._prev_per_link_comm: Dict[str, Dict[str, Any]] = {}
+
     # ---------------- PettingZoo parallel API delegation ----------------
 
     @property
@@ -678,6 +682,128 @@ class MiniShipAISCommsEnv:
 
         return per_link
 
+    def _compute_step_delta_comm(
+        self,
+        current: Dict[Any, Dict[str, Any]],
+        previous: Dict[Any, Dict[str, Any]],
+        count_keys: tuple = ("tx_count", "rx_count", "drop_count", "reorder_count"),
+    ) -> Dict[Any, Dict[str, Any]]:
+        """
+        Compute step-level delta for comm stats.
+
+        For count fields: delta = current - previous
+        For rate/mean fields: keep current value (they're already episode-level averages)
+
+        Returns a dict with same structure but "_delta" suffix added to count fields.
+        """
+        delta = {}
+        for key, curr_metrics in current.items():
+            prev_metrics = previous.get(key, {})
+            delta_metrics = {}
+            for field, value in curr_metrics.items():
+                if field in count_keys:
+                    # Compute delta for count fields
+                    prev_val = prev_metrics.get(field, 0)
+                    delta_metrics[f"{field}_delta"] = int(value) - int(prev_val)
+                    delta_metrics[field] = value  # Also keep cumulative
+                else:
+                    delta_metrics[field] = value  # Keep as-is for rates/means
+            delta[key] = delta_metrics
+        return delta
+
+    def _emit_step_risk_events(
+        self,
+        t: float,
+        infos: Dict[str, Any],
+        rl_data: List[Dict[str, Any]],
+        pf_estimates: List[Dict[str, Any]] | None,
+        true_states: Dict[int, Any],
+    ) -> None:
+        """
+        Detect and emit Stage-4 risk events for case-driven analysis.
+
+        Events emitted:
+        - guard_trigger: Safety guard activated
+        - cost_spike: Cost exceeds threshold (near_miss proxy, rule violation)
+        - near_miss: Close approach detected
+        """
+        if self._staging is None or self._ep is None:
+            return
+
+        # Thresholds for event detection (configurable)
+        NEAR_MISS_DISTANCE = float(self.cfg.get("near_miss_distance", 50.0))  # meters
+        COST_SPIKE_NEAR = float(self.cfg.get("cost_spike_near", 0.5))
+        COST_SPIKE_RULE = float(self.cfg.get("cost_spike_rule", 0.3))
+
+        # ---- Guard trigger events ----
+        for rd in rl_data:
+            agent_id = rd.get("agent_id", "")
+            guard_triggered = rd.get("guard_triggered", False)
+            if guard_triggered:
+                self._staging.emit_stage4_guard_trigger(
+                    ep=self._ep,
+                    t=t,
+                    step_idx=self._step_idx,
+                    agent_id=agent_id,
+                    guard_margin=float(rd.get("guard_margin", 0.0)),
+                    action_override=bool(rd.get("guard_action_override", False)),
+                    original_action=rd.get("action_raw"),
+                )
+
+        # ---- Cost spike events (near-miss proxy, rule violation) ----
+        for rd in rl_data:
+            agent_id = rd.get("agent_id", "")
+            c_near = float(rd.get("c_near", 0.0))
+            c_rule = float(rd.get("c_rule", 0.0))
+
+            if c_near >= COST_SPIKE_NEAR:
+                self._staging.emit_stage4_cost_spike(
+                    ep=self._ep,
+                    t=t,
+                    step_idx=self._step_idx,
+                    agent_id=agent_id,
+                    cost_type="c_near",
+                    cost_value=c_near,
+                    threshold=COST_SPIKE_NEAR,
+                )
+
+            if c_rule >= COST_SPIKE_RULE:
+                self._staging.emit_stage4_rule_violation(
+                    ep=self._ep,
+                    t=t,
+                    step_idx=self._step_idx,
+                    agent_id=agent_id,
+                    rule_type="colreg",
+                    c_rule=c_rule,
+                )
+
+        # ---- Near-miss detection (distance-based) ----
+        # Check pairwise distances between ships
+        ship_ids = sorted(true_states.keys())
+        for i, sid_i in enumerate(ship_ids):
+            for sid_j in ship_ids[i + 1:]:
+                ts_i = true_states.get(sid_i)
+                ts_j = true_states.get(sid_j)
+                if ts_i is None or ts_j is None:
+                    continue
+
+                # Compute distance
+                import math
+                xi, yi = float(getattr(ts_i, "x", 0)), float(getattr(ts_i, "y", 0))
+                xj, yj = float(getattr(ts_j, "x", 0)), float(getattr(ts_j, "y", 0))
+                dist = math.hypot(xi - xj, yi - yj)
+
+                if dist < NEAR_MISS_DISTANCE:
+                    self._staging.emit_stage4_near_miss(
+                        ep=self._ep,
+                        t=t,
+                        step_idx=self._step_idx,
+                        ship_pair=(sid_i, sid_j),
+                        cpa_distance=dist,
+                        tcpa=0.0,  # CPA is now (distance is current)
+                        positions={sid_i: (xi, yi), sid_j: (xj, yj)},
+                    )
+
     def _infer_term_reason(self, infos: Dict[str, Any]) -> str:
         """Infer termination reason from infos."""
         for agent_id, info in infos.items():
@@ -827,6 +953,10 @@ class MiniShipAISCommsEnv:
         self._ep_pf_errors = []
         self._ep_lagrangian_states = []  # Track lambda evolution
 
+        # Reset delta tracking for per-step comm stats
+        self._prev_per_ship_comm = {}
+        self._prev_per_link_comm = {}
+
         # reset AIS and PF
         self._ais.reset(ships=ship_ids, t0=t0, agent_map=self._agent_of_ship)
         self._track_mgr.reset(ship_ids=ship_ids, t0=t0, init_states=true_states, agent_ids=self._int_agents)
@@ -935,13 +1065,25 @@ class MiniShipAISCommsEnv:
 
             # Get per-ship comm stats (optional, for diagnostics)
             per_ship_comm = None
+            per_ship_comm_delta = None
             if self._record_per_ship_comm:
                 per_ship_comm = self._get_per_ship_comm_stats()
+                # Compute step-level delta (tx/rx/drop/reorder counts)
+                per_ship_comm_delta = self._compute_step_delta_comm(
+                    per_ship_comm, self._prev_per_ship_comm
+                )
+                self._prev_per_ship_comm = per_ship_comm  # Update for next step
 
             # Get per-link comm stats (optional, for causality analysis)
             per_link_comm = None
+            per_link_comm_delta = None
             if self._record_per_link_comm:
                 per_link_comm = self._get_per_link_comm_stats()
+                # Compute step-level delta (tx/rx/drop/reorder counts)
+                per_link_comm_delta = self._compute_step_delta_comm(
+                    per_link_comm, self._prev_per_link_comm
+                )
+                self._prev_per_link_comm = per_link_comm  # Update for next step
 
             # Get PF estimates (optional, can be expensive)
             if self._record_pf_estimates:
@@ -952,9 +1094,10 @@ class MiniShipAISCommsEnv:
             if per_ship_comm or per_link_comm:
                 extra = {}
                 if per_ship_comm:
-                    extra["per_ship_comm"] = per_ship_comm
+                    # Include both cumulative and delta stats
+                    extra["per_ship_comm"] = per_ship_comm_delta  # Delta includes both cumulative + _delta fields
                 if per_link_comm:
-                    extra["per_link_comm"] = per_link_comm
+                    extra["per_link_comm"] = per_link_comm_delta  # Delta includes both cumulative + _delta fields
 
             # Emit comprehensive step record
             self._staging.emit_stage3_step(
@@ -967,6 +1110,11 @@ class MiniShipAISCommsEnv:
                 pf_estimates=pf_estimates,
                 extra=extra,
             )
+
+            # =========================================================================
+            # Stage-4 risk events detection and emission
+            # =========================================================================
+            self._emit_step_risk_events(t, infos, rl_data, pf_estimates, true_states)
 
         # Accumulate PF errors for episode summary
         if pf_estimates:

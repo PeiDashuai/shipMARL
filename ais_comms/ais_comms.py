@@ -1470,11 +1470,13 @@ class AISCommsSim:
                 "pdr": float(rx_cnt) / tx_cnt if tx_cnt > 0 else 0.0,
                 "drop_rate": float(drop_cnt) / tx_cnt if tx_cnt > 0 else 0.0,
                 "reorder_rate": float(reorder_cnt) / rx_cnt if rx_cnt > 0 else 0.0,
-                # Delay/Age
+                # Delay/Age stats
                 "delay_mean": float(np.mean(delays)) if delays else 0.0,
                 "delay_p95": _p95(delays),
+                "delay_max": float(max(delays)) if delays else 0.0,
                 "age_mean": float(np.mean(ages)) if ages else 0.0,
                 "age_p95": _p95(ages),
+                "age_max": float(max(ages)) if ages else 0.0,
             }
 
         return result
