@@ -359,7 +359,7 @@ class MiniShipCoreEnv(ParallelEnv):
 
 
         # 仅使用几何观测
-        obs = build_observations(
+        obs_raw = build_observations(
             self.state.ships,
             self.K_neighbors,
             self.spawn_mode,
@@ -367,6 +367,14 @@ class MiniShipCoreEnv(ParallelEnv):
             self.spawn_len,
             self.v_max,
         )
+        # Remap observation keys from ship_id ("1", "2") to agent_id ("ship_1", "ship_2")
+        obs = {}
+        for i, aid in enumerate(self.agents):
+            ship_id_str = str(i + 1)
+            if ship_id_str in obs_raw:
+                obs[aid] = obs_raw[ship_id_str]
+            else:
+                obs[aid] = zero_observation(self._obs_space)
         # cache last infos (for callbacks)
         self._last_infos = infos
 
@@ -803,7 +811,7 @@ class MiniShipCoreEnv(ParallelEnv):
                 for aid in self.agents
             }
         else:
-            observations = build_observations(
+            obs_raw = build_observations(
                 self.state.ships,
                 self.K_neighbors,
                 self.spawn_mode,
@@ -811,6 +819,14 @@ class MiniShipCoreEnv(ParallelEnv):
                 self.spawn_len,
                 self.v_max,
             )
+            # Remap observation keys from ship_id ("1", "2") to agent_id ("ship_1", "ship_2")
+            observations = {}
+            for i, aid in enumerate(self.agents):
+                ship_id_str = str(i + 1)
+                if ship_id_str in obs_raw:
+                    observations[aid] = obs_raw[ship_id_str]
+                else:
+                    observations[aid] = zero_observation(self._obs_space)
 
         # === 关键：把最后一步 infos 缓存下来，供 RLlib 回调读取 ===
         self._last_infos = infos

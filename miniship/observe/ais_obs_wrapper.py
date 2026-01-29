@@ -295,8 +295,12 @@ class AISObsWrapper(ParallelEnv):
 
         obs_out: Dict[str, np.ndarray] = {}
         for i, aid in enumerate(self.agents):
-            if aid in obs_dict:
-                obs_out[aid] = obs_dict[aid]
+            # obs_dict uses ship_id as key (e.g., "1", "2")
+            # agents use agent_id (e.g., "ship_1", "ship_2")
+            # Convert agent_id to ship_id for lookup
+            ship_id_str = str(i + 1)
+            if ship_id_str in obs_dict:
+                obs_out[aid] = obs_dict[ship_id_str]
             else:
                 obs_out[aid] = zero_observation(self._obs_space)
         return obs_out
