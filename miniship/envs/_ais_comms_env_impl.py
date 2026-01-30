@@ -225,6 +225,7 @@ class MiniShipAISCommsEnv:
         if ships is None:
             raise RuntimeError("[MiniShipAISCommsEnv] core env state has no .ships")
         out: Dict[ShipId, TrueState] = {}
+        _dbg_step = getattr(self, '_dbg_pf_obs_step', 0)
         for i, ship in enumerate(ships):
             sid = int(getattr(ship, "sid", getattr(ship, "ship_id", i + 1)))
             x = float(ship.pos[0])
@@ -235,6 +236,9 @@ class MiniShipAISCommsEnv:
             vy = v * math.sin(psi)
             yaw = float(math.atan2(vy, vx)) if (abs(vx) + abs(vy)) > 1e-12 else float(psi)
             out[sid] = TrueState(ship_id=sid, t=t, x=x, y=y, vx=vx, vy=vy, yaw_east_ccw_rad=yaw)
+            # Debug: print actual ship.v
+            if _dbg_step < 2 and i == 0:
+                print(f"[GET_TRUE_STATES] step={_dbg_step} sid={sid} ship.v={v:.3f} v_max={self._v_max:.3f}")
         return t, out
 
     def _build_pf_observations(
