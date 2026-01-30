@@ -191,7 +191,8 @@ class AISObsWrapper(ParallelEnv):
 
         self._tracks = {}
         for idx, ship in enumerate(ships):
-            sid_attr = getattr(ship, "id", None)
+            # Ship class uses 'sid' attribute, not 'id'
+            sid_attr = getattr(ship, "sid", None)
             sid = int(sid_attr) if sid_attr is not None else (idx + 1)
 
             tr = AISTrack()
@@ -211,7 +212,8 @@ class AISObsWrapper(ParallelEnv):
         t = float(getattr(state, "t", 0.0))
 
         for idx, ship in enumerate(ships):
-            sid_attr = getattr(ship, "id", None)
+            # Ship class uses 'sid' attribute, not 'id'
+            sid_attr = getattr(ship, "sid", None)
             sid = int(sid_attr) if sid_attr is not None else (idx + 1)
 
             if sid not in self._tracks:
@@ -261,7 +263,8 @@ class AISObsWrapper(ParallelEnv):
 
         est_ships: list[Ship] = []
         for ship in ships_true:
-            sid_attr = getattr(ship, "id", None)
+            # Ship class uses 'sid' attribute, not 'id'
+            sid_attr = getattr(ship, "sid", None)
             sid = int(sid_attr) if sid_attr is not None else (len(est_ships) + 1)
             tr = self._tracks.get(sid, None)
 
@@ -320,7 +323,8 @@ class AISObsWrapper(ParallelEnv):
 
         rows: list[dict] = []
         for idx, ship in enumerate(ships_true):
-            sid_attr = getattr(ship, "id", None)
+            # Ship class uses 'sid' attribute, not 'id'
+            sid_attr = getattr(ship, "sid", None)
             sid = int(sid_attr) if sid_attr is not None else (idx + 1)
 
             tr = self._tracks.get(sid, None)

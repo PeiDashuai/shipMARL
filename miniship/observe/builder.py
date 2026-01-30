@@ -290,7 +290,8 @@ def build_observations(
 
     # 3) 对每条船构造观测
     for ei, ego in enumerate(ships_v):
-        ego_id = int(getattr(ego, "ship_id", ei +1))
+        # Use _get_ship_id which handles 'sid', 'ship_id', and 'id' attributes
+        ego_id = _get_ship_id(ego, ei + 1)
         ego_id_str = str(int(ego_id))
 
 
@@ -410,7 +411,7 @@ def build_observations(
     # Optional per-ego neighbor debug (compact) - print once per build call (not N times)
     if os.environ.get("OBS_NEI_DBG", "0") == "1":
         for ei, ego in enumerate(ships_v):
-            ego_id = int(getattr(ego, "ship_id", ei +1))
+            ego_id = _get_ship_id(ego, ei + 1)
             if ego_only is not None and int(ego_id) != int(ego_only):
                 continue
             js = [int(neighbors_idx[ei, k]) for k in range(K)]
@@ -422,7 +423,7 @@ def build_observations(
                     metas.append("(empty)")
                 else:
                     nv = ships_v[j]
-                    ids.append(int(getattr(nv, "ship_id", j +1)))
+                    ids.append(_get_ship_id(nv, j + 1))
                     metas.append(
                         f"(valid={int(bool(getattr(nv,'ais_valid',True)))}"
                         f",u_stale={float(getattr(nv,'ais_u_stale',0.0)):.2f}"
