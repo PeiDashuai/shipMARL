@@ -1104,8 +1104,9 @@ def main():
         ep_reward = result.get("episode_reward_mean", 0.0) or 0.0
         succ_rate = result.get("custom_metrics", {}).get("succ_ep_bin_mean", 0.0) or 0.0
         coll_rate = result.get("custom_metrics", {}).get("coll_ep_bin_mean", 0.0) or 0.0
+        tout_rate = result.get("custom_metrics", {}).get("tout_ep_bin_mean", 0.0) or 0.0
 
-        print(f"[iter {i:4d}] reward={ep_reward:+.2f} succ={succ_rate:.2%} coll={coll_rate:.2%}")
+        print(f"[iter {i:4d}] reward={ep_reward:+.2f} succ={succ_rate:.2%} coll={coll_rate:.2%} tout={tout_rate:.2%}")
 
         # Checkpoint
         if i % args.checkpoint_freq == 0:
