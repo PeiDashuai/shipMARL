@@ -255,6 +255,11 @@ class MiniShipAISCommsEnv:
         """
         obs_out: Dict[str, np.ndarray] = {}
 
+        # Debug: track PF estimate availability
+        _dbg_step = getattr(self, '_dbg_pf_obs_step', 0)
+        _dbg_print = (_dbg_step < 3)  # Only print first 3 steps
+        self._dbg_pf_obs_step = _dbg_step + 1
+
         for agent_id in self._int_agents:
             ego_sid = self._ship_of_agent.get(agent_id)
             if ego_sid is None:
@@ -262,6 +267,8 @@ class MiniShipAISCommsEnv:
 
             # Build Ship objects for observation construction
             ships_for_obs: List[Ship] = []
+            _dbg_pf_valid = 0
+            _dbg_pf_invalid = 0
 
             # Process all ships in consistent order
             for sid in sorted(true_states.keys()):
@@ -310,6 +317,7 @@ class MiniShipAISCommsEnv:
                             track_age / self._pf_stale_threshold, 0.0, 1.0
                         ))
                         ship.ais_u_silence = 0.0  # TODO: track silence time
+                        _dbg_pf_valid += 1
                     else:
                         # No PF estimate: mark as invalid, use zero/fallback
                         # Policy should learn to ignore neighbors with ais_valid=False
@@ -324,8 +332,12 @@ class MiniShipAISCommsEnv:
                         ship.ais_valid = False
                         ship.ais_u_stale = 1.0
                         ship.ais_u_silence = 1.0
+                        _dbg_pf_invalid += 1
 
                 ships_for_obs.append(ship)
+
+            if _dbg_print and agent_id == self._int_agents[0]:
+                print(f"[PF_OBS_DBG] step={_dbg_step} agent={agent_id} pf_valid={_dbg_pf_valid} pf_invalid={_dbg_pf_invalid}")
 
             # Build observation for this agent
             obs_dict = build_observations(
@@ -371,16 +383,20 @@ class MiniShipAISCommsEnv:
 
     def _cache_ship_goals(self, true_states: Dict[ShipId, TrueState]) -> None:
         """Cache ship goals from core env state."""
+        self._ship_goals.clear()
         st = getattr(self._core, "state", None)
         if st is None:
+            print("[_cache_ship_goals] WARNING: self._core.state is None")
             return
         ships = getattr(st, "ships", None)
         if ships is None:
+            print("[_cache_ship_goals] WARNING: state.ships is None")
             return
         for ship in ships:
             sid = int(getattr(ship, "sid", getattr(ship, "ship_id", -1)))
             if sid >= 0 and hasattr(ship, "goal"):
                 self._ship_goals[sid] = np.array(ship.goal, dtype=np.float64)
+        print(f"[_cache_ship_goals] Cached goals for {len(self._ship_goals)} ships: {list(self._ship_goals.keys())}")
 
     def _compute_config_hashes(self) -> Dict[str, str]:
         """Compute SHA256 hashes of config files for reproducibility."""
@@ -1123,6 +1139,9 @@ class MiniShipAISCommsEnv:
 
         # Cache ship goals for PF observation building
         self._cache_ship_goals(true_states)
+
+        # Reset debug counter for PF observations
+        self._dbg_pf_obs_step = 0
 
         # Reset episode accumulators
         self._ep_reward_sum = {aid: 0.0 for aid in self._int_agents}
