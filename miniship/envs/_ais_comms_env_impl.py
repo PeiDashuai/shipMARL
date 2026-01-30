@@ -337,7 +337,16 @@ class MiniShipAISCommsEnv:
                 ships_for_obs.append(ship)
 
             if _dbg_print and agent_id == self._int_agents[0]:
-                print(f"[PF_OBS_DBG] step={_dbg_step} agent={agent_id} pf_valid={_dbg_pf_valid} pf_invalid={_dbg_pf_invalid}")
+                # Find ego ship in the list
+                ego_ship = None
+                for s in ships_for_obs:
+                    if s.sid == ego_sid:
+                        ego_ship = s
+                        break
+                ego_pos = tuple(ego_ship.pos) if ego_ship else None
+                ego_goal = tuple(ego_ship.goal) if ego_ship else None
+                print(f"[PF_OBS_DBG] step={_dbg_step} agent={agent_id} ego_sid={ego_sid} pf_valid={_dbg_pf_valid} pf_invalid={_dbg_pf_invalid} "
+                      f"ego_pos={ego_pos} ego_goal={ego_goal}")
 
             # Build observation for this agent
             obs_dict = build_observations(
