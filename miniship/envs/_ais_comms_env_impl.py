@@ -52,6 +52,9 @@ from miniship.envs._ais_staging import (
     build_pf_estimate_dict,
 )
 from miniship.wrappers.lagrangian_pz_env import MiniShipLagrangianParallelEnv
+from miniship.dynamics.ship import Ship
+from miniship.observe.builder import build_observations
+import numpy as np
 
 
 class MiniShipAISCommsEnv:
@@ -77,7 +80,11 @@ class MiniShipAISCommsEnv:
         self._run = RunIdentity.from_cfg(self.cfg)
 
         # ---- Underlying core env (physics/reward/termination) ----
-        self._core = MiniShipLagrangianParallelEnv(self.cfg)
+        # IMPORTANT: Disable AISObsWrapper in _core since we handle observations via PF
+        # This prevents double AIS simulation (AISObsWrapper uses hardcoded params, not yaml config)
+        core_cfg = dict(self.cfg)
+        core_cfg["use_ais_obs"] = False  # We build PF-based observations ourselves
+        self._core = MiniShipLagrangianParallelEnv(core_cfg)
 
         # ---- AIS comms + PF tracker ----
         ais_cfg_path = self.cfg.get("ais_cfg_path", None)
@@ -135,6 +142,23 @@ class MiniShipAISCommsEnv:
         # Per-step delta tracking for comm stats (cumulative → delta conversion)
         self._prev_per_ship_comm: Dict[int, Dict[str, Any]] = {}
         self._prev_per_link_comm: Dict[str, Dict[str, Any]] = {}
+
+        # ---- Observation building parameters ----
+        # These are needed to build observations from PF estimates
+        self._K_neighbors = int(cfg.get("numNeighbors", cfg.get("K_neighbors", 4)))
+        self._spawn_mode = str(cfg.get("spawn_mode", "circle_center"))
+        self._spawn_area = float(cfg.get("spawn_area", 240.0))
+        self._spawn_len = float(cfg.get("spawn_len", 180.0))
+        self._v_max = float(cfg.get("v_max", 3.0))
+
+        # PF uncertainty thresholds for observation validity
+        self._pf_stale_threshold = float(cfg.get("pf_stale_threshold", 5.0))  # seconds
+        self._pf_silence_threshold = float(cfg.get("pf_silence_threshold", 10.0))  # seconds
+
+        # Cache for goals (from true states)
+        self._ship_goals: Dict[ShipId, np.ndarray] = {}
+
+        print(f"[MiniShipAISCommsEnv] PF-based observations enabled, K={self._K_neighbors}")
 
     # ---------------- PettingZoo parallel API delegation ----------------
 
@@ -212,6 +236,151 @@ class MiniShipAISCommsEnv:
             yaw = float(math.atan2(vy, vx)) if (abs(vx) + abs(vy)) > 1e-12 else float(psi)
             out[sid] = TrueState(ship_id=sid, t=t, x=x, y=y, vx=vx, vy=vy, yaw_east_ccw_rad=yaw)
         return t, out
+
+    def _build_pf_observations(
+        self,
+        t: float,
+        true_states: Dict[ShipId, TrueState],
+    ) -> Dict[str, np.ndarray]:
+        """
+        Build observations from PF estimates.
+
+        For each agent:
+          - Ego ship uses TRUE state (agent knows its own position exactly)
+          - Neighbor ships use PF estimates from this agent's tracker
+          - Neighbors with invalid/stale PF tracks are marked with ais_valid=False
+
+        Returns:
+            Dict[agent_id, observation_array]
+        """
+        obs_out: Dict[str, np.ndarray] = {}
+
+        for agent_id in self._int_agents:
+            ego_sid = self._ship_of_agent.get(agent_id)
+            if ego_sid is None:
+                continue
+
+            # Build Ship objects for observation construction
+            ships_for_obs: List[Ship] = []
+
+            # Process all ships in consistent order
+            for sid in sorted(true_states.keys()):
+                true_st = true_states[sid]
+                goal = self._ship_goals.get(sid, np.array([0.0, 0.0], dtype=np.float64))
+
+                if sid == ego_sid:
+                    # Ego ship: use TRUE state (agent knows its own position)
+                    ship = Ship(
+                        sid=sid,
+                        pos=np.array([true_st.x, true_st.y], dtype=np.float64),
+                        goal=goal,
+                        psi=true_st.yaw_east_ccw_rad,
+                        v=true_st.sog,
+                    )
+                    ship.reached = False  # Will be updated from core env
+                    ship.ais_valid = True
+                    ship.ais_u_stale = 0.0
+                    ship.ais_u_silence = 0.0
+                else:
+                    # Neighbor ship: use PF estimate from this agent's tracker
+                    x_pred = self._track_mgr.get_estimate(agent_id, sid, t)
+
+                    if x_pred is not None:
+                        # PF estimate available: [x, y, vx, vy, yaw]
+                        est_x = float(x_pred[0])
+                        est_y = float(x_pred[1])
+                        est_vx = float(x_pred[2])
+                        est_vy = float(x_pred[3])
+                        est_yaw = float(x_pred[4])
+                        est_sog = math.sqrt(est_vx ** 2 + est_vy ** 2)
+
+                        ship = Ship(
+                            sid=sid,
+                            pos=np.array([est_x, est_y], dtype=np.float64),
+                            goal=goal,
+                            psi=est_yaw,
+                            v=est_sog,
+                        )
+                        ship.reached = False
+                        ship.ais_valid = True
+
+                        # Compute uncertainty metrics from PF track
+                        track_age = self._get_track_age(agent_id, sid, t)
+                        ship.ais_u_stale = float(np.clip(
+                            track_age / self._pf_stale_threshold, 0.0, 1.0
+                        ))
+                        ship.ais_u_silence = 0.0  # TODO: track silence time
+                    else:
+                        # No PF estimate: mark as invalid, use zero/fallback
+                        # Policy should learn to ignore neighbors with ais_valid=False
+                        ship = Ship(
+                            sid=sid,
+                            pos=np.array([0.0, 0.0], dtype=np.float64),
+                            goal=goal,
+                            psi=0.0,
+                            v=0.0,
+                        )
+                        ship.reached = False
+                        ship.ais_valid = False
+                        ship.ais_u_stale = 1.0
+                        ship.ais_u_silence = 1.0
+
+                ships_for_obs.append(ship)
+
+            # Build observation for this agent
+            obs_dict = build_observations(
+                ships_for_obs,
+                self._K_neighbors,
+                self._spawn_mode,
+                self._spawn_area,
+                self._spawn_len,
+                self._v_max,
+            )
+
+            # Extract observation for this agent's ship
+            # obs_dict keys are ship_id strings like "1", "2"
+            ego_sid_str = str(ego_sid)
+            if ego_sid_str in obs_dict:
+                obs_out[agent_id] = obs_dict[ego_sid_str]
+            else:
+                # Fallback: find by index
+                for idx, sid in enumerate(sorted(true_states.keys())):
+                    if sid == ego_sid:
+                        sid_str = str(idx + 1)
+                        if sid_str in obs_dict:
+                            obs_out[agent_id] = obs_dict[sid_str]
+                        break
+
+        return obs_out
+
+    def _get_track_age(self, agent_id: str, sid: int, t: float) -> float:
+        """Get the age of a PF track (time since last measurement)."""
+        try:
+            st = self._track_mgr.agent_states.get(agent_id)
+            if st is None:
+                return float('inf')
+            tr = st.tracks.get(sid)
+            if tr is None or tr.pf is None:
+                return float('inf')
+            last_ts = getattr(tr.pf, 'last_ts', None)
+            if last_ts is None:
+                return float('inf')
+            return max(0.0, t - float(last_ts))
+        except Exception:
+            return float('inf')
+
+    def _cache_ship_goals(self, true_states: Dict[ShipId, TrueState]) -> None:
+        """Cache ship goals from core env state."""
+        st = getattr(self._core, "state", None)
+        if st is None:
+            return
+        ships = getattr(st, "ships", None)
+        if ships is None:
+            return
+        for ship in ships:
+            sid = int(getattr(ship, "sid", getattr(ship, "ship_id", -1)))
+            if sid >= 0 and hasattr(ship, "goal"):
+                self._ship_goals[sid] = np.array(ship.goal, dtype=np.float64)
 
     def _compute_config_hashes(self) -> Dict[str, str]:
         """Compute SHA256 hashes of config files for reproducibility."""
@@ -952,6 +1121,9 @@ class MiniShipAISCommsEnv:
         ship_ids = sorted(true_states.keys())
         self._last_true_states = true_states
 
+        # Cache ship goals for PF observation building
+        self._cache_ship_goals(true_states)
+
         # Reset episode accumulators
         self._ep_reward_sum = {aid: 0.0 for aid in self._int_agents}
         self._ep_cost_sum = {"near": 0.0, "rule": 0.0, "coll": 0.0, "time": 0.0}
@@ -1041,6 +1213,11 @@ class MiniShipAISCommsEnv:
         t, true_states = self._get_true_states()
         ready = self._ais.step(t=t, true_states=true_states)
         self._track_mgr.ingest(t=t, ready=ready, true_states=true_states)
+
+        # ---- Build observations from PF estimates ----
+        # Replace core env observations with PF-based observations
+        # This is the key fix: agents see PF-estimated neighbor positions, not true positions
+        obs = self._build_pf_observations(t, true_states)
 
         # ---- Accumulate episode stats ----
         for agent_id in self._int_agents:
