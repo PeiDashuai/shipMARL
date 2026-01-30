@@ -1236,7 +1236,24 @@ class MiniShipAISCommsEnv:
         # ---- Build observations from PF estimates ----
         # Replace core env observations with PF-based observations
         # This is the key fix: agents see PF-estimated neighbor positions, not true positions
-        obs = self._build_pf_observations(t, true_states)
+        pf_obs = self._build_pf_observations(t, true_states)
+
+        # Verify PF observations - fall back to core obs if PF fails
+        _dbg_step = getattr(self, '_dbg_pf_obs_step', 0)
+        if pf_obs and all(aid in pf_obs for aid in obs.keys()):
+            # Debug: compare shapes
+            if _dbg_step < 3:
+                for aid in list(obs.keys())[:1]:
+                    core_shape = obs[aid].shape if hasattr(obs[aid], 'shape') else 'N/A'
+                    pf_shape = pf_obs[aid].shape if aid in pf_obs and hasattr(pf_obs[aid], 'shape') else 'N/A'
+                    print(f"[PF_OBS_DBG] step={_dbg_step} {aid}: core_shape={core_shape}, pf_shape={pf_shape}")
+            obs = pf_obs
+        else:
+            # Fallback: use core env observations if PF failed
+            if _dbg_step < 5:
+                print(f"[PF_OBS_DBG] WARNING: PF obs incomplete, using core obs. "
+                      f"pf_keys={list(pf_obs.keys()) if pf_obs else None} "
+                      f"core_keys={list(obs.keys())}")
 
         # ---- Accumulate episode stats ----
         for agent_id in self._int_agents:
