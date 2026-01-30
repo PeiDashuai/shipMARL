@@ -1250,12 +1250,20 @@ class MiniShipAISCommsEnv:
         # Verify PF observations - fall back to core obs if PF fails
         _dbg_step = getattr(self, '_dbg_pf_obs_step', 0)
         if pf_obs and all(aid in pf_obs for aid in obs.keys()):
-            # Debug: compare shapes
-            if _dbg_step < 3:
+            # Debug: compare observation values between core and PF
+            if _dbg_step < 2:
                 for aid in list(obs.keys())[:1]:
-                    core_shape = obs[aid].shape if hasattr(obs[aid], 'shape') else 'N/A'
-                    pf_shape = pf_obs[aid].shape if aid in pf_obs and hasattr(pf_obs[aid], 'shape') else 'N/A'
-                    print(f"[PF_OBS_DBG] step={_dbg_step} {aid}: core_shape={core_shape}, pf_shape={pf_shape}")
+                    core_obs = obs[aid]
+                    pf_obs_arr = pf_obs[aid]
+                    # Print first 8 dims (ego features) and goal-related features
+                    print(f"[PF_OBS_CMP] step={_dbg_step} {aid} CORE ego[0:8]={[f'{x:.3f}' for x in core_obs[:8]]}")
+                    print(f"[PF_OBS_CMP] step={_dbg_step} {aid}   PF ego[0:8]={[f'{x:.3f}' for x in pf_obs_arr[:8]]}")
+                    # Print neighbor valid flags (index 18, 29, 40, 51 for K=4, F_nei=11)
+                    nei_valid_idxs = [8 + k*11 + 10 for k in range(4)]  # valid flag is last in neighbor features
+                    core_valid = [f'{core_obs[i]:.1f}' for i in nei_valid_idxs if i < len(core_obs)]
+                    pf_valid = [f'{pf_obs_arr[i]:.1f}' for i in nei_valid_idxs if i < len(pf_obs_arr)]
+                    print(f"[PF_OBS_CMP] step={_dbg_step} {aid} CORE nei_valid={core_valid}")
+                    print(f"[PF_OBS_CMP] step={_dbg_step} {aid}   PF nei_valid={pf_valid}")
             obs = pf_obs
         else:
             # Fallback: use core env observations if PF failed
