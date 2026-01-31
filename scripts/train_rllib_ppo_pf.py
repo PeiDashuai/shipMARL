@@ -385,6 +385,10 @@ class MiniShipCallbacks(DefaultCallbacks):
         # init latch from env_cfg
         self._cfg_initialized = False
 
+        # Action diagnostics
+        self._action_dbg_count = 0
+        self._action_dbg_max = 3  # Print first N trajectory action stats
+
     # ---------------- dual snapshot helpers ----------------
     def get_dual_snapshot(self) -> dict:
         return {
@@ -711,6 +715,23 @@ class MiniShipCallbacks(DefaultCallbacks):
         for k, v in c_sums_local.items():
             episode.user_data[f"{k}_sum"] += float(v)
 
+        # Action diagnostics: log action statistics for first few trajectories
+        if self._action_dbg_count < self._action_dbg_max:
+            if SampleBatch.ACTIONS in postprocessed_batch:
+                actions = np.asarray(postprocessed_batch[SampleBatch.ACTIONS], dtype=np.float32)
+                if actions.ndim == 2 and actions.shape[1] == 2:
+                    dpsi_mean = float(np.mean(actions[:, 0]))
+                    dpsi_std = float(np.std(actions[:, 0]))
+                    v_mean = float(np.mean(actions[:, 1]))
+                    v_std = float(np.std(actions[:, 1]))
+                    print(
+                        f"[ACTION-DBG] agent={agent_id} steps={len(actions)} "
+                        f"dpsi=[{dpsi_mean:+.3f}±{dpsi_std:.3f}] "
+                        f"v_cmd=[{v_mean:+.3f}±{v_std:.3f}] "
+                        f"range=[{float(actions.min()):+.3f},{float(actions.max()):+.3f}]"
+                    )
+                    self._action_dbg_count += 1
+
     def on_episode_end(self, *, worker, base_env, policies, episode, env_index=None, **kwargs):
         steps = max(1, int(episode.user_data.get("steps", 1)))
         c_mean = {}
@@ -823,6 +844,23 @@ class MiniShipCallbacks(DefaultCallbacks):
         episode.custom_metrics["dual_version_worker"] = float(getattr(self, "_dual_version", -1))
         episode.custom_metrics["lam_near_worker"] = float(self.lam["near"])
         episode.custom_metrics["lam_rule_worker"] = float(self.lam["rule"])
+
+        # Goal distance metrics (for debugging why 0% success)
+        goal_dist_end_sum = 0.0
+        goal_dist_min_sum = 0.0
+        valid_agent_cnt = 0
+        for aid in agent_ids:
+            info = core_infos.get(aid, {}) if isinstance(core_infos, dict) and isinstance(core_infos.get(aid), dict) else {}
+            gd_end = info.get("goal_dist", None)
+            gd_min = info.get("goal_dist_min", None)
+            if isinstance(gd_end, (int, float)) and np.isfinite(gd_end):
+                goal_dist_end_sum += float(gd_end)
+                valid_agent_cnt += 1
+            if isinstance(gd_min, (int, float)) and np.isfinite(gd_min):
+                goal_dist_min_sum += float(gd_min)
+        if valid_agent_cnt > 0:
+            episode.custom_metrics["goal_dist_end_mean"] = goal_dist_end_sum / valid_agent_cnt
+            episode.custom_metrics["goal_dist_min_mean"] = goal_dist_min_sum / valid_agent_cnt
 
         # STAGING emit stage4 summary (no direct stage file writes)
         sub_env = _pick_sub_env(base_env, env_index)
@@ -1105,8 +1143,13 @@ def main():
         succ_rate = result.get("custom_metrics", {}).get("succ_ep_bin_mean", 0.0) or 0.0
         coll_rate = result.get("custom_metrics", {}).get("coll_ep_bin_mean", 0.0) or 0.0
         tout_rate = result.get("custom_metrics", {}).get("tout_ep_bin_mean", 0.0) or 0.0
+        goal_dist_end = result.get("custom_metrics", {}).get("goal_dist_end_mean_mean", -1.0) or -1.0
+        goal_dist_min = result.get("custom_metrics", {}).get("goal_dist_min_mean_mean", -1.0) or -1.0
 
-        print(f"[iter {i:4d}] reward={ep_reward:+.2f} succ={succ_rate:.2%} coll={coll_rate:.2%} tout={tout_rate:.2%}")
+        print(
+            f"[iter {i:4d}] reward={ep_reward:+.2f} succ={succ_rate:.2%} coll={coll_rate:.2%} tout={tout_rate:.2%} "
+            f"gd_end={goal_dist_end:.1f}m gd_min={goal_dist_min:.1f}m"
+        )
 
         # Checkpoint
         if i % args.checkpoint_freq == 0:
