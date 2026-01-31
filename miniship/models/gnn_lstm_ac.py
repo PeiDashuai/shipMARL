@@ -328,8 +328,13 @@ class MiniShipGNNLSTMActorCritic(TorchModelV2, nn.Module):
         # 邻船节点初始化: [B*T, K, D_gnn]
         h_nei = self.neigh_init(neigh_feat)
 
-        # mask：邻船全 0 表示 padding
-        mask = (neigh_feat.abs().sum(dim=-1) > 0).float()  # [B*T, K]
+        # mask：使用邻居的 valid 标志（neighbor_dim 的最后一个元素）
+        # neighbor feature layout: [n8(8), u_stale(1), u_silence(1), valid(1)] = 11 dims
+        # valid=1 表示有效邻居，valid=0 表示无效/padding
+        # 旧的实现 `neigh_feat.abs().sum() > 0` 有 bug：
+        #   当 ais_valid=False 时，n8=0 但 u_stale=1, u_silence=1，sum > 0 导致 mask=1
+        #   这会让无效邻居参与消息传递，影响学习
+        mask = neigh_feat[:, :, -1]  # [B*T, K]，直接使用 valid 标志
 
         # 第一层 MPNN
         h1 = self.gnn1(h_self, h_nei, edge_feat, mask)
