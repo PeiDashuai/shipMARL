@@ -298,6 +298,27 @@ class MiniShipAISCommsEnv:
                     # Neighbor ship: use PF estimate from this agent's tracker
                     x_pred = self._track_mgr.get_estimate(agent_id, sid, t)
 
+                    # Debug: compare PF estimate vs true state for neighbors
+                    if _dbg_print and agent_id == self._int_agents[0]:
+                        true_x, true_y = true_st.x, true_st.y
+                        true_vx, true_vy = true_st.vx, true_st.vy
+                        true_yaw = true_st.yaw_east_ccw_rad
+                        if x_pred is not None:
+                            pf_x, pf_y = x_pred[0], x_pred[1]
+                            pf_vx, pf_vy = x_pred[2], x_pred[3]
+                            pf_yaw = x_pred[4]
+                            pos_err = math.sqrt((pf_x - true_x)**2 + (pf_y - true_y)**2)
+                            vel_err = math.sqrt((pf_vx - true_vx)**2 + (pf_vy - true_vy)**2)
+                            yaw_err = abs(pf_yaw - true_yaw)
+                            print(f"[PF_EST_CMP] step={_dbg_step} nei_sid={sid} "
+                                  f"TRUE pos=({true_x:.1f},{true_y:.1f}) vel=({true_vx:.2f},{true_vy:.2f}) yaw={true_yaw:.2f}")
+                            print(f"[PF_EST_CMP] step={_dbg_step} nei_sid={sid} "
+                                  f"  PF pos=({pf_x:.1f},{pf_y:.1f}) vel=({pf_vx:.2f},{pf_vy:.2f}) yaw={pf_yaw:.2f}")
+                            print(f"[PF_EST_CMP] step={_dbg_step} nei_sid={sid} "
+                                  f"  ERR pos={pos_err:.1f}m vel={vel_err:.2f}m/s yaw={math.degrees(yaw_err):.1f}deg")
+                        else:
+                            print(f"[PF_EST_CMP] step={_dbg_step} nei_sid={sid} PF estimate is None!")
+
                     if x_pred is not None:
                         # PF estimate available: [x, y, vx, vy, yaw]
                         est_x = float(x_pred[0])
