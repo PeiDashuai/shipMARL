@@ -188,6 +188,10 @@ class MiniShipGNNLSTMActorCritic(TorchModelV2, nn.Module):
             nn.ReLU(),
         )
 
+        # Skip connection projection: self_feat -> gnn_hidden_size
+        # This preserves goal direction signal which is critical for learning
+        self.self_skip = nn.Linear(self.self_dim, self.gnn_hidden_size)
+
         # ---------- 两层 MPNN ----------
         self.gnn1 = MPNNLayer(
             node_dim=self.gnn_hidden_size,
@@ -342,7 +346,10 @@ class MiniShipGNNLSTMActorCritic(TorchModelV2, nn.Module):
         # 第二层 MPNN（此处简单地仍使用初始邻居表示 h_nei；若要更完整的图更新可以后续扩展）
         h2 = self.gnn2(h1, h_nei, edge_feat, mask)
 
-        gnn_emb = h2  # [B*T, D_gnn]
+        # Skip connection: preserve self_feat (especially goal direction g_fwd_norm, g_lat_norm)
+        # Without this, goal signal gets diluted through MPNN layers and model can't learn goal-seeking
+        skip_feat = self.self_skip(self_feat)  # [B*T, D_gnn]
+        gnn_emb = h2 + skip_feat  # Residual connection
 
         # ---------- LSTM：时间维 ----------
         lstm_in = self._add_time_dim(gnn_emb, seq_lens, self.max_seq_len)  # [B, T, D_gnn]
