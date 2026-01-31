@@ -1268,6 +1268,19 @@ class MiniShipAISCommsEnv:
                     # Check if ego features match (they should now!)
                     ego_diff = sum(abs(core_obs[i] - pf_obs_arr[i]) for i in range(8))
                     print(f"[PF_OBS_CMP] step={_dbg_step} {aid} ego_diff_sum={ego_diff:.6f} {'OK' if ego_diff < 0.01 else 'MISMATCH!'}")
+
+                    # Compare neighbor features (index 8 onwards, 11 dims per neighbor)
+                    K = self._K_neighbors
+                    for k in range(K):
+                        nei_start = 8 + k * 11
+                        nei_end = nei_start + 11
+                        if nei_end <= len(core_obs):
+                            core_nei = core_obs[nei_start:nei_end]
+                            pf_nei = pf_obs_arr[nei_start:nei_end]
+                            nei_diff = sum(abs(core_nei[i] - pf_nei[i]) for i in range(11))
+                            # Print neighbor comparison (first 8 = geometry, last 3 = u_stale, u_silence, valid)
+                            print(f"[PF_OBS_CMP] step={_dbg_step} {aid} nei[{k}] CORE={[f'{x:.2f}' for x in core_nei]}")
+                            print(f"[PF_OBS_CMP] step={_dbg_step} {aid} nei[{k}]   PF={[f'{x:.2f}' for x in pf_nei]} diff={nei_diff:.3f}")
             obs = pf_obs
         else:
             # Fallback: use core env observations if PF failed
