@@ -144,12 +144,14 @@ class MiniShipAISCommsEnv:
         self._prev_per_link_comm: Dict[str, Dict[str, Any]] = {}
 
         # ---- Observation building parameters ----
-        # These are needed to build observations from PF estimates
-        self._K_neighbors = int(cfg.get("numNeighbors", cfg.get("K_neighbors", 4)))
-        self._spawn_mode = str(cfg.get("spawn_mode", "circle_center"))
-        self._spawn_area = float(cfg.get("spawn_area", 240.0))
-        self._spawn_len = float(cfg.get("spawn_len", 180.0))
-        self._v_max = float(cfg.get("v_max", 3.0))
+        # CRITICAL: Read all observation params from CORE env to ensure consistency
+        # Previously had different defaults causing observation mismatch (e.g., v_max: 3.0 vs 2.0)
+        core_env = self._core.core  # MiniShipCoreEnv
+        self._K_neighbors = int(core_env.K_neighbors)
+        self._spawn_mode = str(core_env.spawn_mode)
+        self._spawn_area = float(core_env.spawn_area)
+        self._spawn_len = float(core_env.spawn_len)
+        self._v_max = float(core_env.v_max)
 
         # PF uncertainty thresholds for observation validity
         self._pf_stale_threshold = float(cfg.get("pf_stale_threshold", 5.0))  # seconds
@@ -158,7 +160,7 @@ class MiniShipAISCommsEnv:
         # Cache for goals (from true states)
         self._ship_goals: Dict[ShipId, np.ndarray] = {}
 
-        print(f"[MiniShipAISCommsEnv] PF-based observations enabled, K={self._K_neighbors}")
+        print(f"[MiniShipAISCommsEnv] PF-based observations enabled, K={self._K_neighbors}, v_max={self._v_max}")
 
     # ---------------- PettingZoo parallel API delegation ----------------
 
@@ -1259,15 +1261,13 @@ class MiniShipAISCommsEnv:
                 for aid in list(obs.keys())[:1]:
                     core_obs = obs[aid]
                     pf_obs_arr = pf_obs[aid]
-                    # Print first 8 dims (ego features) and goal-related features
+                    # Print first 8 dims (ego features) - should now match!
+                    print(f"[PF_OBS_CMP] step={_dbg_step} {aid} v_max={self._v_max}")
                     print(f"[PF_OBS_CMP] step={_dbg_step} {aid} CORE ego[0:8]={[f'{x:.3f}' for x in core_obs[:8]]}")
                     print(f"[PF_OBS_CMP] step={_dbg_step} {aid}   PF ego[0:8]={[f'{x:.3f}' for x in pf_obs_arr[:8]]}")
-                    # Print neighbor valid flags (index 18, 29, 40, 51 for K=4, F_nei=11)
-                    nei_valid_idxs = [8 + k*11 + 10 for k in range(4)]  # valid flag is last in neighbor features
-                    core_valid = [f'{core_obs[i]:.1f}' for i in nei_valid_idxs if i < len(core_obs)]
-                    pf_valid = [f'{pf_obs_arr[i]:.1f}' for i in nei_valid_idxs if i < len(pf_obs_arr)]
-                    print(f"[PF_OBS_CMP] step={_dbg_step} {aid} CORE nei_valid={core_valid}")
-                    print(f"[PF_OBS_CMP] step={_dbg_step} {aid}   PF nei_valid={pf_valid}")
+                    # Check if ego features match (they should now!)
+                    ego_diff = sum(abs(core_obs[i] - pf_obs_arr[i]) for i in range(8))
+                    print(f"[PF_OBS_CMP] step={_dbg_step} {aid} ego_diff_sum={ego_diff:.6f} {'OK' if ego_diff < 0.01 else 'MISMATCH!'}")
             obs = pf_obs
         else:
             # Fallback: use core env observations if PF failed
