@@ -44,7 +44,8 @@ class MiniShipLagrangianParallelEnv(ParallelEnv):
 
         # 2) 是否使用 AIS noisy 观测（从 cfg 中读取开关）
         self.use_ais_obs = bool(cfg.get("use_ais_obs", False))
-        print("[MiniShipLagrangianParallelEnv] use_ais_obs =", self.use_ais_obs)
+        # [PERF] Disabled to reduce log noise - uncomment for debugging
+        # print("[MiniShipLagrangianParallelEnv] use_ais_obs =", self.use_ais_obs)
 
         if self.use_ais_obs:
             # AISObsWrapper 只改观测，不改 reward/infos/终止逻辑

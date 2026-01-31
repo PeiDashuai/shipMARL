@@ -385,9 +385,9 @@ class MiniShipCallbacks(DefaultCallbacks):
         # init latch from env_cfg
         self._cfg_initialized = False
 
-        # Action diagnostics
+        # Action diagnostics (disabled by default for performance)
         self._action_dbg_count = 0
-        self._action_dbg_max = 3  # Print first N trajectory action stats
+        self._action_dbg_max = 0  # Set to >0 to print first N trajectory action stats
 
     # ---------------- dual snapshot helpers ----------------
     def get_dual_snapshot(self) -> dict:
@@ -494,11 +494,12 @@ class MiniShipCallbacks(DefaultCallbacks):
 
         self._cfg_initialized = True
 
-        print(
-            "[shipMARL][CallbackCfg] init_ok "
-            f"use_lagrangian={self.use_lagrangian} lam={self.lam} "
-            f"staging_out={self._staging_out_dir} strict={self._staging_strict}"
-        )
+        # [PERF] Disabled to reduce log noise - uncomment for debugging
+        # print(
+        #     "[shipMARL][CallbackCfg] init_ok "
+        #     f"use_lagrangian={self.use_lagrangian} lam={self.lam} "
+        #     f"staging_out={self._staging_out_dir} strict={self._staging_strict}"
+        # )
 
     @staticmethod
     def _infer_mode(env_cfg: dict) -> str:

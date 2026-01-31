@@ -281,7 +281,10 @@ def _assert_stage34_join_contract(row: Mapping[str, object], *, where: str) -> N
 
 
 # ===================== VERSION / PATH DEBUG =====================
+# [PERF] Disabled by default - set PATHDBG=1 to enable
 def _print_loaded_paths_once():
+    if os.environ.get("PATHDBG", "0") != "1":
+        return  # Skip for performance
     try:
         import ais_comms
         import ais_comms.track_manager_pf as _tm

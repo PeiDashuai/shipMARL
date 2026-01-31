@@ -113,11 +113,12 @@ class MiniShipAISCommsEnv:
 
         # ---- Recording options ----
         # Control what data is recorded (can disable for performance)
-        self._record_step_data = bool(self.cfg.get("staging_record_steps", True))
-        self._record_pf_estimates = bool(self.cfg.get("staging_record_pf", True))
-        # Per-ship/per-link comm stats (default ON for causality analysis)
-        self._record_per_ship_comm = bool(self.cfg.get("staging_record_per_ship_comm", True))
-        self._record_per_link_comm = bool(self.cfg.get("staging_record_per_link_comm", True))
+        # [PERF] Default OFF for high-volume per-step recording; enable via config if needed
+        self._record_step_data = bool(self.cfg.get("staging_record_steps", False))
+        self._record_pf_estimates = bool(self.cfg.get("staging_record_pf", False))
+        # Per-ship/per-link comm stats (default OFF for performance; enable for causality analysis)
+        self._record_per_ship_comm = bool(self.cfg.get("staging_record_per_ship_comm", False))
+        self._record_per_link_comm = bool(self.cfg.get("staging_record_per_link_comm", False))
 
         # episode identity allocator
         self._ep_alloc = EpisodeIdAllocator(self._run)
@@ -160,7 +161,8 @@ class MiniShipAISCommsEnv:
         # Cache for goals (from true states)
         self._ship_goals: Dict[ShipId, np.ndarray] = {}
 
-        print(f"[MiniShipAISCommsEnv] PF-based observations enabled, K={self._K_neighbors}, v_max={self._v_max}")
+        # [PERF] Disabled to reduce log noise - uncomment for debugging
+        # print(f"[MiniShipAISCommsEnv] PF-based observations enabled, K={self._K_neighbors}, v_max={self._v_max}")
 
     # ---------------- PettingZoo parallel API delegation ----------------
 
@@ -395,7 +397,8 @@ class MiniShipAISCommsEnv:
             sid = int(getattr(ship, "sid", getattr(ship, "ship_id", -1)))
             if sid >= 0 and hasattr(ship, "goal"):
                 self._ship_goals[sid] = np.array(ship.goal, dtype=np.float64)
-        print(f"[_cache_ship_goals] Cached goals for {len(self._ship_goals)} ships: {list(self._ship_goals.keys())}")
+        # [PERF] Disabled to reduce log noise - uncomment for debugging
+        # print(f"[_cache_ship_goals] Cached goals for {len(self._ship_goals)} ships: {list(self._ship_goals.keys())}")
 
     def _compute_config_hashes(self) -> Dict[str, str]:
         """Compute SHA256 hashes of config files for reproducibility."""
