@@ -227,7 +227,6 @@ class MiniShipAISCommsEnv:
         if ships is None:
             raise RuntimeError("[MiniShipAISCommsEnv] core env state has no .ships")
         out: Dict[ShipId, TrueState] = {}
-        _dbg_step = getattr(self, '_dbg_pf_obs_step', 0)
         for i, ship in enumerate(ships):
             sid = int(getattr(ship, "sid", getattr(ship, "ship_id", i + 1)))
             x = float(ship.pos[0])
@@ -238,9 +237,6 @@ class MiniShipAISCommsEnv:
             vy = v * math.sin(psi)
             yaw = float(math.atan2(vy, vx)) if (abs(vx) + abs(vy)) > 1e-12 else float(psi)
             out[sid] = TrueState(ship_id=sid, t=t, x=x, y=y, vx=vx, vy=vy, yaw_east_ccw_rad=yaw)
-            # Debug: print actual ship.v
-            if _dbg_step < 2 and i == 0:
-                print(f"[GET_TRUE_STATES] step={_dbg_step} sid={sid} ship.v={v:.3f} v_max={self._v_max:.3f}")
         return t, out
 
     def _build_pf_observations(
@@ -261,11 +257,6 @@ class MiniShipAISCommsEnv:
         """
         obs_out: Dict[str, np.ndarray] = {}
 
-        # Debug: track PF estimate availability
-        _dbg_step = getattr(self, '_dbg_pf_obs_step', 0)
-        _dbg_print = (_dbg_step < 3)  # Only print first 3 steps
-        self._dbg_pf_obs_step = _dbg_step + 1
-
         for agent_id in self._int_agents:
             ego_sid = self._ship_of_agent.get(agent_id)
             if ego_sid is None:
@@ -273,8 +264,6 @@ class MiniShipAISCommsEnv:
 
             # Build Ship objects for observation construction
             ships_for_obs: List[Ship] = []
-            _dbg_pf_valid = 0
-            _dbg_pf_invalid = 0
 
             # Process all ships in consistent order
             for sid in sorted(true_states.keys()):
@@ -297,36 +286,6 @@ class MiniShipAISCommsEnv:
                 else:
                     # Neighbor ship: use PF estimate from this agent's tracker
                     x_pred = self._track_mgr.get_estimate(agent_id, sid, t)
-
-                    # Debug: compare PF estimate vs true state for neighbors
-                    if _dbg_print and agent_id == self._int_agents[0]:
-                        true_x, true_y = true_st.x, true_st.y
-                        true_vx, true_vy = true_st.vx, true_st.vy
-                        true_yaw = true_st.yaw_east_ccw_rad
-                        true_sog = true_st.sog
-                        if x_pred is not None:
-                            # PF state: [px, py, v, yaw, yawd]
-                            pf_x, pf_y = float(x_pred[0]), float(x_pred[1])
-                            pf_v = float(x_pred[2])       # speed magnitude
-                            pf_yaw = float(x_pred[3])     # heading
-                            # Convert to vx, vy for comparison
-                            pf_vx = pf_v * math.cos(pf_yaw)
-                            pf_vy = pf_v * math.sin(pf_yaw)
-                            pos_err = math.sqrt((pf_x - true_x)**2 + (pf_y - true_y)**2)
-                            vel_err = math.sqrt((pf_vx - true_vx)**2 + (pf_vy - true_vy)**2)
-                            sog_err = abs(pf_v - true_sog)
-                            yaw_err = abs(pf_yaw - true_yaw)
-                            # Wrap yaw error to [-pi, pi]
-                            if yaw_err > math.pi:
-                                yaw_err = 2 * math.pi - yaw_err
-                            print(f"[PF_EST_CMP] step={_dbg_step} nei_sid={sid} "
-                                  f"TRUE pos=({true_x:.1f},{true_y:.1f}) sog={true_sog:.2f} yaw={math.degrees(true_yaw):.1f}deg")
-                            print(f"[PF_EST_CMP] step={_dbg_step} nei_sid={sid} "
-                                  f"  PF pos=({pf_x:.1f},{pf_y:.1f}) sog={pf_v:.2f} yaw={math.degrees(pf_yaw):.1f}deg")
-                            print(f"[PF_EST_CMP] step={_dbg_step} nei_sid={sid} "
-                                  f"  ERR pos={pos_err:.1f}m sog={sog_err:.2f}m/s yaw={math.degrees(yaw_err):.1f}deg")
-                        else:
-                            print(f"[PF_EST_CMP] step={_dbg_step} nei_sid={sid} PF estimate is None!")
 
                     if x_pred is not None:
                         # PF state vector is [px, py, v, yaw, yawd] - NOT [px, py, vx, vy, yaw]!
@@ -362,7 +321,6 @@ class MiniShipAISCommsEnv:
                             track_age / self._pf_stale_threshold, 0.0, 1.0
                         ))
                         ship.ais_u_silence = 0.0  # TODO: track silence time
-                        _dbg_pf_valid += 1
                     else:
                         # No PF estimate: mark as invalid, use zero/fallback
                         # Policy should learn to ignore neighbors with ais_valid=False
@@ -377,21 +335,8 @@ class MiniShipAISCommsEnv:
                         ship.ais_valid = False
                         ship.ais_u_stale = 1.0
                         ship.ais_u_silence = 1.0
-                        _dbg_pf_invalid += 1
 
                 ships_for_obs.append(ship)
-
-            if _dbg_print and agent_id == self._int_agents[0]:
-                # Find ego ship in the list
-                ego_ship = None
-                for s in ships_for_obs:
-                    if s.sid == ego_sid:
-                        ego_ship = s
-                        break
-                ego_pos = tuple(ego_ship.pos) if ego_ship else None
-                ego_goal = tuple(ego_ship.goal) if ego_ship else None
-                print(f"[PF_OBS_DBG] step={_dbg_step} agent={agent_id} ego_sid={ego_sid} pf_valid={_dbg_pf_valid} pf_invalid={_dbg_pf_invalid} "
-                      f"ego_pos={ego_pos} ego_goal={ego_goal}")
 
             # Build observation for this agent
             obs_dict = build_observations(
@@ -1194,9 +1139,6 @@ class MiniShipAISCommsEnv:
         # Cache ship goals for PF observation building
         self._cache_ship_goals(true_states)
 
-        # Reset debug counter for PF observations
-        self._dbg_pf_obs_step = 0
-
         # Reset episode accumulators
         self._ep_reward_sum = {aid: 0.0 for aid in self._int_agents}
         self._ep_cost_sum = {"near": 0.0, "rule": 0.0, "coll": 0.0, "time": 0.0}
@@ -1292,41 +1234,9 @@ class MiniShipAISCommsEnv:
         # This is the key fix: agents see PF-estimated neighbor positions, not true positions
         pf_obs = self._build_pf_observations(t, true_states)
 
-        # Verify PF observations - fall back to core obs if PF fails
-        _dbg_step = getattr(self, '_dbg_pf_obs_step', 0)
+        # Use PF observations if available, otherwise fall back to core obs
         if pf_obs and all(aid in pf_obs for aid in obs.keys()):
-            # Debug: compare observation values between core and PF
-            if _dbg_step < 2:
-                for aid in list(obs.keys())[:1]:
-                    core_obs = obs[aid]
-                    pf_obs_arr = pf_obs[aid]
-                    # Print first 8 dims (ego features) - should now match!
-                    print(f"[PF_OBS_CMP] step={_dbg_step} {aid} v_max={self._v_max}")
-                    print(f"[PF_OBS_CMP] step={_dbg_step} {aid} CORE ego[0:8]={[f'{x:.3f}' for x in core_obs[:8]]}")
-                    print(f"[PF_OBS_CMP] step={_dbg_step} {aid}   PF ego[0:8]={[f'{x:.3f}' for x in pf_obs_arr[:8]]}")
-                    # Check if ego features match (they should now!)
-                    ego_diff = sum(abs(core_obs[i] - pf_obs_arr[i]) for i in range(8))
-                    print(f"[PF_OBS_CMP] step={_dbg_step} {aid} ego_diff_sum={ego_diff:.6f} {'OK' if ego_diff < 0.01 else 'MISMATCH!'}")
-
-                    # Compare neighbor features (index 8 onwards, 11 dims per neighbor)
-                    K = self._K_neighbors
-                    for k in range(K):
-                        nei_start = 8 + k * 11
-                        nei_end = nei_start + 11
-                        if nei_end <= len(core_obs):
-                            core_nei = core_obs[nei_start:nei_end]
-                            pf_nei = pf_obs_arr[nei_start:nei_end]
-                            nei_diff = sum(abs(core_nei[i] - pf_nei[i]) for i in range(11))
-                            # Print neighbor comparison (first 8 = geometry, last 3 = u_stale, u_silence, valid)
-                            print(f"[PF_OBS_CMP] step={_dbg_step} {aid} nei[{k}] CORE={[f'{x:.2f}' for x in core_nei]}")
-                            print(f"[PF_OBS_CMP] step={_dbg_step} {aid} nei[{k}]   PF={[f'{x:.2f}' for x in pf_nei]} diff={nei_diff:.3f}")
             obs = pf_obs
-        else:
-            # Fallback: use core env observations if PF failed
-            if _dbg_step < 5:
-                print(f"[PF_OBS_DBG] WARNING: PF obs incomplete, using core obs. "
-                      f"pf_keys={list(pf_obs.keys()) if pf_obs else None} "
-                      f"core_keys={list(obs.keys())}")
 
         # ---- Accumulate episode stats ----
         for agent_id in self._int_agents:
