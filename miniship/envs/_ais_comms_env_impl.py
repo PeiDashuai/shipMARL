@@ -303,30 +303,48 @@ class MiniShipAISCommsEnv:
                         true_x, true_y = true_st.x, true_st.y
                         true_vx, true_vy = true_st.vx, true_st.vy
                         true_yaw = true_st.yaw_east_ccw_rad
+                        true_sog = true_st.sog
                         if x_pred is not None:
-                            pf_x, pf_y = x_pred[0], x_pred[1]
-                            pf_vx, pf_vy = x_pred[2], x_pred[3]
-                            pf_yaw = x_pred[4]
+                            # PF state: [px, py, v, yaw, yawd]
+                            pf_x, pf_y = float(x_pred[0]), float(x_pred[1])
+                            pf_v = float(x_pred[2])       # speed magnitude
+                            pf_yaw = float(x_pred[3])     # heading
+                            # Convert to vx, vy for comparison
+                            pf_vx = pf_v * math.cos(pf_yaw)
+                            pf_vy = pf_v * math.sin(pf_yaw)
                             pos_err = math.sqrt((pf_x - true_x)**2 + (pf_y - true_y)**2)
                             vel_err = math.sqrt((pf_vx - true_vx)**2 + (pf_vy - true_vy)**2)
+                            sog_err = abs(pf_v - true_sog)
                             yaw_err = abs(pf_yaw - true_yaw)
+                            # Wrap yaw error to [-pi, pi]
+                            if yaw_err > math.pi:
+                                yaw_err = 2 * math.pi - yaw_err
                             print(f"[PF_EST_CMP] step={_dbg_step} nei_sid={sid} "
-                                  f"TRUE pos=({true_x:.1f},{true_y:.1f}) vel=({true_vx:.2f},{true_vy:.2f}) yaw={true_yaw:.2f}")
+                                  f"TRUE pos=({true_x:.1f},{true_y:.1f}) sog={true_sog:.2f} yaw={math.degrees(true_yaw):.1f}deg")
                             print(f"[PF_EST_CMP] step={_dbg_step} nei_sid={sid} "
-                                  f"  PF pos=({pf_x:.1f},{pf_y:.1f}) vel=({pf_vx:.2f},{pf_vy:.2f}) yaw={pf_yaw:.2f}")
+                                  f"  PF pos=({pf_x:.1f},{pf_y:.1f}) sog={pf_v:.2f} yaw={math.degrees(pf_yaw):.1f}deg")
                             print(f"[PF_EST_CMP] step={_dbg_step} nei_sid={sid} "
-                                  f"  ERR pos={pos_err:.1f}m vel={vel_err:.2f}m/s yaw={math.degrees(yaw_err):.1f}deg")
+                                  f"  ERR pos={pos_err:.1f}m sog={sog_err:.2f}m/s yaw={math.degrees(yaw_err):.1f}deg")
                         else:
                             print(f"[PF_EST_CMP] step={_dbg_step} nei_sid={sid} PF estimate is None!")
 
                     if x_pred is not None:
-                        # PF estimate available: [x, y, vx, vy, yaw]
+                        # PF state vector is [px, py, v, yaw, yawd] - NOT [px, py, vx, vy, yaw]!
+                        # - x_pred[0]: px (position x)
+                        # - x_pred[1]: py (position y)
+                        # - x_pred[2]: v (speed magnitude in m/s)
+                        # - x_pred[3]: yaw (heading in yaw_sim_rad, +x=0, CCW+)
+                        # - x_pred[4]: yawd (yaw rate in rad/s, not used here)
                         est_x = float(x_pred[0])
                         est_y = float(x_pred[1])
-                        est_vx = float(x_pred[2])
-                        est_vy = float(x_pred[3])
-                        est_yaw = float(x_pred[4])
-                        est_sog = math.sqrt(est_vx ** 2 + est_vy ** 2)
+                        est_v = float(x_pred[2])      # speed magnitude
+                        est_yaw = float(x_pred[3])    # heading angle
+                        # x_pred[4] is yawd (turn rate), not needed for Ship
+
+                        # Convert (v, yaw) to (vx, vy) for consistency with TrueState
+                        est_vx = est_v * math.cos(est_yaw)
+                        est_vy = est_v * math.sin(est_yaw)
+                        est_sog = est_v  # sog = speed magnitude directly
 
                         ship = Ship(
                             sid=sid,
