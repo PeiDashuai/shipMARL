@@ -265,10 +265,6 @@ class MiniShipAISCommsEnv:
             # Build Ship objects for observation construction
             ships_for_obs: List[Ship] = []
 
-            # Debug: check goal values (first few steps only)
-            _dbg_goal_step = getattr(self, '_dbg_goal_step', 0)
-            _dbg_goal_print = (_dbg_goal_step < 3) and (agent_id == self._int_agents[0])
-
             # Process all ships in consistent order
             for sid in sorted(true_states.keys()):
                 true_st = true_states[sid]
@@ -287,16 +283,6 @@ class MiniShipAISCommsEnv:
                     ship.ais_valid = True
                     ship.ais_u_stale = 0.0
                     ship.ais_u_silence = 0.0
-
-                    # Debug: print ego goal info
-                    if _dbg_goal_print:
-                        dx = goal[0] - true_st.x
-                        dy = goal[1] - true_st.y
-                        dist_to_goal = math.sqrt(dx*dx + dy*dy)
-                        print(f"[GOAL_DBG] step={_dbg_goal_step} ego_sid={sid} "
-                              f"pos=({true_st.x:.1f},{true_st.y:.1f}) "
-                              f"goal=({goal[0]:.1f},{goal[1]:.1f}) "
-                              f"dist={dist_to_goal:.1f}m psi={math.degrees(true_st.yaw_east_ccw_rad):.1f}deg")
                 else:
                     # Neighbor ship: use PF estimate from this agent's tracker
                     x_pred = self._track_mgr.get_estimate(agent_id, sid, t)
@@ -375,18 +361,6 @@ class MiniShipAISCommsEnv:
                         if sid_str in obs_dict:
                             obs_out[agent_id] = obs_dict[sid_str]
                         break
-
-            # Debug: print observation goal features (indices 6,7 are g_fwd_norm, g_lat_norm)
-            if _dbg_goal_print and agent_id in obs_out:
-                obs_vec = obs_out[agent_id]
-                # obs layout: [x, y, vx, vy, psi, v_norm, g_fwd_norm, g_lat_norm, ...]
-                g_fwd = float(obs_vec[6]) if len(obs_vec) > 6 else 0.0
-                g_lat = float(obs_vec[7]) if len(obs_vec) > 7 else 0.0
-                print(f"[GOAL_DBG] step={_dbg_goal_step} ego_sid={ego_sid} "
-                      f"obs[6:8]=[g_fwd={g_fwd:.3f}, g_lat={g_lat:.3f}] (norm by spawn_len={self._spawn_len})")
-
-        # Increment debug step counter
-        self._dbg_goal_step = getattr(self, '_dbg_goal_step', 0) + 1
 
         return obs_out
 
@@ -1164,9 +1138,6 @@ class MiniShipAISCommsEnv:
 
         # Cache ship goals for PF observation building
         self._cache_ship_goals(true_states)
-
-        # Reset debug counters
-        self._dbg_goal_step = 0
 
         # Reset episode accumulators
         self._ep_reward_sum = {aid: 0.0 for aid in self._int_agents}
