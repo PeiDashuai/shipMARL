@@ -409,10 +409,15 @@ class MiniShipMultiAgentWrapper(MultiAgentEnv):
                     pass
         return self._dual_snapshot
 
-    # RLlib sometimes reads env.agents
+    # RLlib sometimes reads/writes env.agents
     @property
     def agents(self):
         return list(self._agent_ids)
+
+    @agents.setter
+    def agents(self, value):
+        # RLlib MultiAgentEnv base class may try to set this
+        self._agent_ids = set(value) if value else set()
 
     @property
     def core_env(self):
