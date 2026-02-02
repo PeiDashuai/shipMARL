@@ -1,0 +1,94 @@
+# ais_config_comm_base2.yaml
+# Purpose:
+#   - Baseline 2-ship validation config for "communication-centric" analysis.
+#   - Mild-to-moderate channel impairment + scheduler jitter.
+#   - Keep per-episode sampling ranges so logs should contain:
+#       episode_params (ranges) + effective (sampled) in episode_init.
+#
+# Notes:
+#   - Keep reorder disabled in the first validation round (avoid confounding).
+#   - Queue capacity is moderate (so you can later create a CAP-LOW variant).
+
+seed_base: 2026
+
+episode:
+  sampling: default
+
+channel:
+  ge:
+    # Gilbert-Elliott: occasional transition to bad state
+    # p_g2b: prob good->bad per step
+    # p_b2g: prob bad->good per step
+    # drop_bad: drop probability when in bad state
+    p_g2b:   [0.005, 0.020]
+    p_b2g:   [0.200, 0.600]
+    drop_bad:[0.300, 0.700]
+
+  burst:
+    # Rare burst events that increase drop rate temporarily
+    enable: true
+    prob: 0.010
+    dur_s: [2.0, 6.0]
+    extra_drop: [0.20, 0.60]
+
+delay:
+  # Lognormal-ish delay sampling (as in your current schema)
+  enable: true
+  mu:    [0.3, 1.5]     # seconds
+  sigma: [0.2, 0.6]
+  clip:  [2.0, 8.0]     # seconds
+
+clock:
+  # Keep time aligned in the first validation run
+  enable: true
+  offset_s: 0.0
+  drift_ppm: 0.0
+
+scheduler:
+  # Focus on scheduler effect through jitter (AoI variance) in this baseline
+  base_period_s: 0.1
+  jitter_frac: 0.10      # 10% jitter
+  break_prob: 0.0
+  break_dur_s: [0.0, 0.0]
+
+queue:
+  # Moderate capacity: enough for N=2 but still meaningful for comm_stats
+  ttl_s: [20.0, 40.0]
+  max_inflight: [200, 400]
+
+obs:
+  # Observation slot settings (controls AoI cap and slot survival)
+  slot_K: 16
+  slot_ttl_s: [20.0, 40.0]
+  age_cap_s:  [5.0, 12.0]
+  miss_mask: true
+
+noise:
+  # Small-to-moderate measurement noise (kept mild for first run)
+  position_m: [0.0, 0.0]
+  sog_mps:    [0.0, 0.0]
+  cog_deg:    [0.0, 0.0]
+  regional_bias:
+    enable: false
+    rects: []
+
+reorder:
+  # Disable reorder in the first validation config
+  enable: false
+  prob: 0.05
+  extra_delay_s: 0.8
+
+gps_bias:
+  enable: false
+  pos_bias_max_m: 0.0
+  drift_max_mps: 0.0
+
+logging:
+  print_params: true
+  export_episode_params: true
+  export_link_samples: true
+  link_samples_path: "./ais_link_samples.csv"
+  export_reorder_samples: true
+  reorder_samples_path: "ais_metrics_reorder.csv"
+  clock_dbg_print: false
+  clock_dbg_per_step_max: 0
