@@ -106,6 +106,49 @@ def _read_text_file(path: str, max_bytes: int = 2_000_000) -> dict:
         out["error"] = repr(e)
         return out
 
+def _resolve_checkpoint_path(path: str) -> str:
+    """
+    Resolve checkpoint path from user input.
+
+    Supports:
+      - Direct checkpoint path: TRAIN_base2/best/
+      - Parent output dir + subdir: TRAIN_base2 + "best" -> TRAIN_base2/best/
+      - Auto-detect rllib_checkpoint.json in directory
+
+    Returns the resolved checkpoint directory path.
+    Raises FileNotFoundError if checkpoint cannot be found.
+    """
+    if not path:
+        raise ValueError("Checkpoint path cannot be empty")
+
+    path = os.path.abspath(path)
+
+    # If path points to rllib_checkpoint.json, use parent directory
+    if path.endswith("rllib_checkpoint.json"):
+        path = os.path.dirname(path)
+
+    # Check if it's a valid checkpoint directory
+    if os.path.isdir(path):
+        ckpt_marker = os.path.join(path, "rllib_checkpoint.json")
+        if os.path.isfile(ckpt_marker):
+            return path
+
+        # Try common subdirectories: best, final, checkpoints
+        for subdir in ["best", "final", "checkpoints"]:
+            sub_path = os.path.join(path, subdir)
+            sub_marker = os.path.join(sub_path, "rllib_checkpoint.json")
+            if os.path.isfile(sub_marker):
+                print(f"[shipMARL] Auto-detected checkpoint in: {subdir}/")
+                return sub_path
+
+        raise FileNotFoundError(
+            f"No valid checkpoint found in: {path}\n"
+            f"  Expected rllib_checkpoint.json in the directory or in best/final/checkpoints subdirs."
+        )
+
+    raise FileNotFoundError(f"Checkpoint path does not exist: {path}")
+
+
 def _try_get_git_state(cwd: str) -> dict:
     st = {"ok": False, "cwd": os.path.abspath(cwd), "commit": None, "dirty": None, "error": None}
     try:
@@ -1097,7 +1140,8 @@ def main():
     # Run control
     parser.add_argument("--iterations", type=int, default=100, help="Training iterations")
     parser.add_argument("--checkpoint-freq", type=int, default=10, help="Checkpoint frequency")
-    parser.add_argument("--resume", default=None, help="Resume from checkpoint")
+    parser.add_argument("--resume", default=None,
+                        help="Resume from checkpoint directory (e.g., TRAIN_base2/best or TRAIN_base2)")
 
     args = parser.parse_args()
 
@@ -1132,8 +1176,21 @@ def main():
     algo = config.build()
 
     if args.resume:
-        print(f"[shipMARL] Resuming from: {args.resume}")
-        algo.restore(args.resume)
+        try:
+            ckpt_path = _resolve_checkpoint_path(args.resume)
+            print(f"[shipMARL] Resuming from checkpoint: {ckpt_path}")
+            algo.restore(ckpt_path)
+            print(f"[shipMARL] Checkpoint loaded successfully")
+        except FileNotFoundError as e:
+            print(f"[shipMARL] ERROR: {e}")
+            algo.stop()
+            ray.shutdown()
+            return 1
+        except Exception as e:
+            print(f"[shipMARL] ERROR loading checkpoint: {e}")
+            algo.stop()
+            ray.shutdown()
+            return 1
 
     best_reward = float("-inf")
 
