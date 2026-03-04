@@ -27,19 +27,32 @@ N_SHIPS=2                  # Start with 2 ships
 DT=0.5                     # Simulation timestep
 T_MAX=180.0                # Max episode time
 
+# Early stopping (prevents policy collapse from overtraining)
+EARLY_STOP=true            # Enable early stopping
+EARLY_STOP_SUCC=0.95       # Stop when success rate >= 95%
+EARLY_STOP_PATIENCE=20     # Require 20 consecutive iterations
+EARLY_STOP_MIN_ITER=100    # Don't stop before iter 100
+
 echo "============================================================================"
 echo "Training Baseline Model v1"
 echo "============================================================================"
 echo "Output:     ${OUTPUT_DIR}"
 echo "AIS Config: ${AIS_CONFIG}"
-echo "Iterations: ${ITERATIONS}"
+echo "Iterations: ${ITERATIONS} (max)"
 echo "Model:      ${MODEL}"
 echo "LR:         ${LR}"
 echo "Lagrangian: ENABLED"
+echo "Early Stop: ${EARLY_STOP} (succ>=${EARLY_STOP_SUCC} for ${EARLY_STOP_PATIENCE} iters, min=${EARLY_STOP_MIN_ITER})"
 echo "============================================================================"
 
 # Create output directory
 mkdir -p "${OUTPUT_DIR}"
+
+# Build early stop args
+EARLY_STOP_ARGS=""
+if [ "${EARLY_STOP}" = "true" ]; then
+    EARLY_STOP_ARGS="--early-stop --early-stop-succ ${EARLY_STOP_SUCC} --early-stop-patience ${EARLY_STOP_PATIENCE} --early-stop-min-iter ${EARLY_STOP_MIN_ITER}"
+fi
 
 # Run training
 PYTHONPATH=. python scripts/train_rllib_ppo_pf.py \
@@ -59,7 +72,8 @@ PYTHONPATH=. python scripts/train_rllib_ppo_pf.py \
     --num-workers ${NUM_WORKERS} \
     --num-envs-per-worker ${ENVS_PER_WORKER} \
     --checkpoint-freq 10 \
-    --out-dir ${OUTPUT_DIR}
+    --out-dir ${OUTPUT_DIR} \
+    ${EARLY_STOP_ARGS}
 
 echo "============================================================================"
 echo "Training complete!"

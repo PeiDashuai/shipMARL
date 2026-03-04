@@ -1143,6 +1143,12 @@ def main():
     parser.add_argument("--resume", default=None,
                         help="Resume from checkpoint directory (e.g., TRAIN_base2/best or TRAIN_base2)")
 
+    # Early stopping
+    parser.add_argument("--early-stop", action="store_true", help="Enable early stopping")
+    parser.add_argument("--early-stop-succ", type=float, default=0.95, help="Success rate threshold for early stop")
+    parser.add_argument("--early-stop-patience", type=int, default=20, help="Consecutive iterations above threshold")
+    parser.add_argument("--early-stop-min-iter", type=int, default=50, help="Minimum iterations before early stop")
+
     args = parser.parse_args()
 
     # Initialize Ray
@@ -1194,6 +1200,10 @@ def main():
 
     best_reward = float("-inf")
 
+    # Early stopping state
+    early_stop_hits = 0
+    best_succ_rate = 0.0
+
     for i in range(1, args.iterations + 1):
         result = algo.train()
 
@@ -1215,10 +1225,24 @@ def main():
             ckpt_path = getattr(getattr(ckpt, "checkpoint", None), "path", str(ckpt))
             print(f"[shipMARL] Checkpoint saved: {ckpt_path}")
 
-        # Best model
-        if ep_reward > best_reward:
+        # Best model (by success rate, not just reward)
+        if succ_rate > best_succ_rate or (succ_rate == best_succ_rate and ep_reward > best_reward):
+            best_succ_rate = succ_rate
             best_reward = ep_reward
             algo.save(os.path.join(args.out_dir, "best"))
+
+        # Early stopping check
+        if args.early_stop and i >= args.early_stop_min_iter:
+            if succ_rate >= args.early_stop_succ:
+                early_stop_hits += 1
+                if early_stop_hits >= args.early_stop_patience:
+                    print(f"[shipMARL] Early stopping triggered at iter {i}: "
+                          f"succ={succ_rate:.2%} >= {args.early_stop_succ:.2%} for {early_stop_hits} consecutive iters")
+                    # Save final checkpoint before stopping
+                    algo.save(os.path.join(args.out_dir, "early_stop"))
+                    break
+            else:
+                early_stop_hits = 0
 
     # Final save
     final_ckpt = algo.save(os.path.join(args.out_dir, "final"))
