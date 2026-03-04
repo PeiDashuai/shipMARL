@@ -38,7 +38,7 @@ def task_reward(ships, dpsi_rl, last_phi, risk, v_max, step_cost, arrival_bonus)
     # Distance-aware shaping:
     #   - Far from goal: encourage speed + closing velocity (learning signal is strong).
     #   - Near goal: discourage high speed (reduce overshoot / orbiting around goal_tol).
-    near_radius = 80.0
+    near_radius = 40.0  # 缩小减速区，原80.0导致策略过早减速
     near_w = np.clip((near_radius - to_goal_norm) / max(near_radius, 1e-6), 0.0, 1.0)  # 1 near, 0 far
     far_w  = 1.0 - near_w
 
@@ -58,7 +58,7 @@ def task_reward(ships, dpsi_rl, last_phi, risk, v_max, step_cost, arrival_bonus)
     r_heading = w_heading * risk_low * (0.6 + 0.4 * near_w) * np.clip(np.cos(head_err), 0.0, 1.0) * speed_ratio
 
     # Penalize high speed near goal to increase capture probability within goal_tol.
-    w_slow_near = 0.8
+    w_slow_near = 0.3  # 减弱减速惩罚，原0.8导致策略在40-50m处徘徊
     r_slow_near = -w_slow_near * risk_low * near_w * (speed_ratio ** 2)
 
     dpsi_scale = math.radians(20.0)  # 或从 env 传入 dpsi_max
