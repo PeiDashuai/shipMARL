@@ -92,15 +92,10 @@ class MiniShipGNNLSTMActorCritic(TorchModelV2, nn.Module):
         TorchModelV2.__init__(self, obs_space, action_space, num_outputs, model_config, name)
         nn.Module.__init__(self)
 
-        # RLlib passes custom_model_config inside model_config, not as a separate kwarg
-        custom_cfg: Dict[str, Any] = model_config.get("custom_model_config", {})
-        if not custom_cfg:
-            # Fallback to kwargs for backward compatibility
-            custom_cfg = kwargs.get("custom_model_config", {})
+        custom_cfg: Dict[str, Any] = kwargs.get("custom_model_config", {})
 
         # 先确定 K / 邻居 / 边 / id 维度（这些我们在 builder 里是固定设计好的）
-        # Default num_neighbors=4 matches env default (miniship_core_env.py:135 numNeighbors)
-        self.num_neighbors: int = int(custom_cfg.get("num_neighbors", 4))
+        self.num_neighbors: int = int(custom_cfg.get("num_neighbors", 6))
         self.neighbor_dim: int = int(custom_cfg.get("neighbor_dim", 11))
         self.edge_dim: int = int(custom_cfg.get("edge_dim", 8))
         self.id_dim: int = int(custom_cfg.get("id_dim", 1))
@@ -187,10 +182,6 @@ class MiniShipGNNLSTMActorCritic(TorchModelV2, nn.Module):
             nn.Linear(self.gnn_hidden_size, self.gnn_hidden_size),
             nn.ReLU(),
         )
-
-        # Skip connection projection: self_feat -> gnn_hidden_size
-        # This preserves goal direction signal which is critical for learning
-        self.self_skip = nn.Linear(self.self_dim, self.gnn_hidden_size)
 
         # ---------- 两层 MPNN ----------
         self.gnn1 = MPNNLayer(
@@ -332,13 +323,8 @@ class MiniShipGNNLSTMActorCritic(TorchModelV2, nn.Module):
         # 邻船节点初始化: [B*T, K, D_gnn]
         h_nei = self.neigh_init(neigh_feat)
 
-        # mask：使用邻居的 valid 标志（neighbor_dim 的最后一个元素）
-        # neighbor feature layout: [n8(8), u_stale(1), u_silence(1), valid(1)] = 11 dims
-        # valid=1 表示有效邻居，valid=0 表示无效/padding
-        # 旧的实现 `neigh_feat.abs().sum() > 0` 有 bug：
-        #   当 ais_valid=False 时，n8=0 但 u_stale=1, u_silence=1，sum > 0 导致 mask=1
-        #   这会让无效邻居参与消息传递，影响学习
-        mask = neigh_feat[:, :, -1]  # [B*T, K]，直接使用 valid 标志
+        # mask：邻船全 0 表示 padding
+        mask = (neigh_feat.abs().sum(dim=-1) > 0).float()  # [B*T, K]
 
         # 第一层 MPNN
         h1 = self.gnn1(h_self, h_nei, edge_feat, mask)
@@ -346,10 +332,7 @@ class MiniShipGNNLSTMActorCritic(TorchModelV2, nn.Module):
         # 第二层 MPNN（此处简单地仍使用初始邻居表示 h_nei；若要更完整的图更新可以后续扩展）
         h2 = self.gnn2(h1, h_nei, edge_feat, mask)
 
-        # Skip connection: preserve self_feat (especially goal direction g_fwd_norm, g_lat_norm)
-        # Without this, goal signal gets diluted through MPNN layers and model can't learn goal-seeking
-        skip_feat = self.self_skip(self_feat)  # [B*T, D_gnn]
-        gnn_emb = h2 + skip_feat  # Residual connection
+        gnn_emb = h2  # [B*T, D_gnn]
 
         # ---------- LSTM：时间维 ----------
         lstm_in = self._add_time_dim(gnn_emb, seq_lens, self.max_seq_len)  # [B, T, D_gnn]
