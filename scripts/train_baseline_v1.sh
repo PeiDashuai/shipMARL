@@ -16,7 +16,7 @@ MODEL="gnn_lstm"
 # Training hyperparameters (conservative for stability)
 LR=1e-4                    # Lower learning rate for stability
 ENTROPY_COEFF=0.015        # Slightly higher entropy for exploration
-CLIP_PARAM=0.1             # Conservative clip (default 0.2 causes instability)
+CLIP_PARAM=0.2             # Standard clip (will decay adaptively)
 TRAIN_BATCH=4000           # Standard batch size
 SGD_MINIBATCH=256          # Standard minibatch
 NUM_SGD_ITER=10            # Standard SGD iterations
@@ -34,13 +34,13 @@ EARLY_STOP_SUCC=0.95       # Stop when success rate >= 95%
 EARLY_STOP_PATIENCE=10     # Require 10 consecutive iterations (reduced from 20)
 EARLY_STOP_MIN_ITER=80     # Don't stop before iter 80
 
-# Stability controls (NEW)
+# Stability controls
 LR_DECAY_ON_PLATEAU=true   # Decay LR when success plateaus
 LR_DECAY_FACTOR=0.5        # Halve LR when triggered
-LR_DECAY_SUCC=0.90         # Trigger LR decay at 90% success
-LR_MIN=1e-5                # Minimum LR
+LR_DECAY_SUCC=0.85         # Trigger LR decay at 85% success (lowered)
+LR_MIN=5e-5                # Minimum LR (raised for faster recovery)
 STOP_ON_COLLAPSE=true      # Stop if performance collapses
-COLLAPSE_DROP=0.15         # Stop if success drops 15% from peak
+COLLAPSE_DROP=0.10         # Stop if success drops 10% from peak (more sensitive)
 
 echo "============================================================================"
 echo "Training Baseline Model v1 (Stable)"
