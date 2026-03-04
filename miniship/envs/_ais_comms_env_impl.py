@@ -385,20 +385,33 @@ class MiniShipAISCommsEnv:
     def _cache_ship_goals(self, true_states: Dict[ShipId, TrueState]) -> None:
         """Cache ship goals from core env state."""
         self._ship_goals.clear()
+
+        # Try multiple paths to access core env state
         st = getattr(self._core, "state", None)
         if st is None:
-            print("[_cache_ship_goals] WARNING: self._core.state is None")
+            # Try through .core attribute (MiniShipLagrangianParallelEnv.core.state)
+            core = getattr(self._core, "core", None)
+            if core is not None:
+                st = getattr(core, "state", None)
+
+        if st is None:
+            print("[_cache_ship_goals] WARNING: Cannot access state from self._core")
             return
+
         ships = getattr(st, "ships", None)
         if ships is None:
             print("[_cache_ship_goals] WARNING: state.ships is None")
             return
+
         for ship in ships:
             sid = int(getattr(ship, "sid", getattr(ship, "ship_id", -1)))
             if sid >= 0 and hasattr(ship, "goal"):
                 self._ship_goals[sid] = np.array(ship.goal, dtype=np.float64)
-        # [PERF] Disabled to reduce log noise - uncomment for debugging
-        # print(f"[_cache_ship_goals] Cached goals for {len(self._ship_goals)} ships: {list(self._ship_goals.keys())}")
+
+        # DEBUG: Print goals cached (only first reset)
+        if not hasattr(self, "_goal_debug_printed"):
+            print(f"[_cache_ship_goals] Cached goals for {len(self._ship_goals)} ships: {dict((k, v.tolist()) for k, v in self._ship_goals.items())}")
+            self._goal_debug_printed = True
 
     def _compute_config_hashes(self) -> Dict[str, str]:
         """Compute SHA256 hashes of config files for reproducibility."""
@@ -1141,6 +1154,10 @@ class MiniShipAISCommsEnv:
 
         # Cache ship goals for PF observation building
         self._cache_ship_goals(true_states)
+
+        # DEBUG: Verify goals are cached correctly
+        if len(self._ship_goals) == 0:
+            print(f"[AIS_ENV WARN] _ship_goals is EMPTY after caching! This will break goal-seeking behavior.")
 
         # Reset episode accumulators
         self._ep_reward_sum = {aid: 0.0 for aid in self._int_agents}
