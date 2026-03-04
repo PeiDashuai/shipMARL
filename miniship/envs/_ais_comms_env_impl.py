@@ -1231,6 +1231,17 @@ class MiniShipAISCommsEnv:
             "episode_uid": self._ep.episode_uid,
             "episode_idx": self._ep.episode_idx,
         }
+
+        # DEBUG: Compare core obs vs PF obs goal features (indices 6,7 are g_fwd_norm, g_lat_norm)
+        if not hasattr(self, "_obs_debug_printed"):
+            pf_obs = self._build_pf_observations(t0, true_states)
+            for aid in list(obs.keys())[:1]:  # Only first agent
+                if aid in pf_obs:
+                    core_goal = obs[aid][6:8] if len(obs[aid]) >= 8 else "N/A"
+                    pf_goal = pf_obs[aid][6:8] if len(pf_obs[aid]) >= 8 else "N/A"
+                    print(f"[OBS_DEBUG] Agent {aid}: core_goal_feat={core_goal}, pf_goal_feat={pf_goal}")
+            self._obs_debug_printed = True
+
         return obs, infos
 
     # ---------------- Step with comprehensive staging ----------------
