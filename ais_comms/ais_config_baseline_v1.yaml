@@ -1,0 +1,110 @@
+# ============================================================================
+# ais_config_baseline_v1.yaml
+# Purpose: Stable baseline config for training foundation collision avoidance model
+# Design: Mild impairments, suitable for from-scratch training with Lagrangian
+# ============================================================================
+
+seed_base: 2026
+
+episode:
+  sampling: default
+
+# ----------------------------------------------------------------------------
+# Channel Model (Gilbert-Elliott)
+# Conservative settings: low transition to bad state, moderate recovery
+# ----------------------------------------------------------------------------
+channel:
+  ge:
+    p_g2b: [0.01, 0.05]      # Low probability of entering bad state
+    p_b2g: [0.30, 0.60]      # Fast recovery from bad state
+    drop_bad: [0.40, 0.70]   # Moderate drop rate in bad state
+  burst:
+    enable: false            # Disable burst for baseline training
+    prob: 0.0
+    dur_s: [0.0, 0.0]
+    extra_drop: [0.0, 0.0]
+
+# ----------------------------------------------------------------------------
+# Delay Model
+# Small delays to maintain observation freshness
+# ----------------------------------------------------------------------------
+delay:
+  enable: true
+  mu: [0.2, 0.8]             # Mean delay 0.2-0.8 seconds
+  sigma: [0.1, 0.3]          # Low variance
+  clip: [1.5, 3.0]           # Max delay 1.5-3 seconds (conservative)
+
+# ----------------------------------------------------------------------------
+# Clock Synchronization
+# Disabled for baseline - can enable in harder configs
+# ----------------------------------------------------------------------------
+clock:
+  enable: false
+  offset_s: 0.0
+  drift_ppm: 0.0
+
+# ----------------------------------------------------------------------------
+# AIS Message Scheduler
+# Realistic AIS Class A timing (2-3 seconds base period)
+# ----------------------------------------------------------------------------
+scheduler:
+  base_period_s: 2.5         # Standard AIS update rate
+  jitter_frac: 0.15          # 15% jitter (realistic)
+  break_prob: 0.0            # No transmission breaks
+  break_dur_s: [0.0, 0.0]
+
+# ----------------------------------------------------------------------------
+# Message Queue
+# Generous capacity for stable operation
+# ----------------------------------------------------------------------------
+queue:
+  ttl_s: [30.0, 60.0]        # Message lifetime
+  max_inflight: [512, 1024]  # Sufficient capacity
+
+# ----------------------------------------------------------------------------
+# Observation Construction
+# Standard slot-based observation
+# ----------------------------------------------------------------------------
+obs:
+  slot_K: 16                 # Number of neighbor slots
+  slot_ttl_s: [30.0, 60.0]   # Slot memory duration
+  age_cap_s: [4.0, 8.0]      # AoI cap for observation normalization
+  miss_mask: true            # Enable missing data masking
+
+# ----------------------------------------------------------------------------
+# Measurement Noise
+# Light noise to improve generalization without hindering learning
+# ----------------------------------------------------------------------------
+noise:
+  position_m: [0.5, 2.0]     # Mild position noise (0.5-2m std)
+  sog_mps: [0.05, 0.15]      # Mild speed noise
+  cog_deg: [0.3, 1.0]        # Mild heading noise
+  regional_bias:
+    enable: false
+    rects: []
+
+# ----------------------------------------------------------------------------
+# Disabled Features (for baseline stability)
+# ----------------------------------------------------------------------------
+reorder:
+  enable: false              # No packet reordering
+  prob: 0.0
+  extra_delay_s: [0.0, 0.0]
+
+gps_bias:
+  enable: false              # No GPS bias
+  pos_bias_max_m: 0.0
+  drift_max_mps: 0.0
+
+# ----------------------------------------------------------------------------
+# Logging
+# ----------------------------------------------------------------------------
+logging:
+  print_params: true
+  export_episode_params: true
+  export_link_samples: false
+  link_samples_path: "./ais_link_samples.csv"
+  export_reorder_samples: false
+  reorder_samples_path: "ais_metrics_reorder.csv"
+  clock_dbg_print: false
+  clock_dbg_per_step_max: 0
