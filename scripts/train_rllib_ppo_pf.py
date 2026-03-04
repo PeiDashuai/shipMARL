@@ -1068,7 +1068,7 @@ def build_ppo_config(args, run_uuid: str) -> PPOConfig:
             entropy_coeff=args.entropy_coeff,
             gamma=0.99,
             lambda_=0.95,
-            clip_param=0.2,
+            clip_param=args.clip_param,
             vf_clip_param=10.0,
         )
         .rollouts(
@@ -1127,6 +1127,7 @@ def main():
     parser.add_argument("--sgd-minibatch-size", type=int, default=256, help="SGD minibatch size")
     parser.add_argument("--num-sgd-iter", type=int, default=10, help="Number of SGD iterations")
     parser.add_argument("--entropy-coeff", type=float, default=0.01, help="Entropy coefficient")
+    parser.add_argument("--clip-param", type=float, default=0.2, help="PPO clip parameter (lower=more stable)")
     parser.add_argument("--num-workers", type=int, default=4, help="Number of rollout workers")
     parser.add_argument("--num-envs-per-worker", type=int, default=2, help="Envs per worker")
     parser.add_argument("--model", default="gnn_lstm", choices=["gnn_lstm", "mlp"], help="Model type")
@@ -1148,6 +1149,14 @@ def main():
     parser.add_argument("--early-stop-succ", type=float, default=0.95, help="Success rate threshold for early stop")
     parser.add_argument("--early-stop-patience", type=int, default=20, help="Consecutive iterations above threshold")
     parser.add_argument("--early-stop-min-iter", type=int, default=50, help="Minimum iterations before early stop")
+
+    # Stability controls
+    parser.add_argument("--lr-decay-on-plateau", action="store_true", help="Decay LR when success plateaus")
+    parser.add_argument("--lr-decay-factor", type=float, default=0.5, help="LR decay multiplier")
+    parser.add_argument("--lr-decay-succ-threshold", type=float, default=0.90, help="Success rate to trigger LR decay")
+    parser.add_argument("--lr-min", type=float, default=1e-5, help="Minimum learning rate")
+    parser.add_argument("--stop-on-collapse", action="store_true", help="Stop if performance drops significantly from peak")
+    parser.add_argument("--collapse-drop-threshold", type=float, default=0.20, help="Success rate drop from peak to trigger stop")
 
     args = parser.parse_args()
 
@@ -1203,6 +1212,12 @@ def main():
     # Early stopping state
     early_stop_hits = 0
     best_succ_rate = 0.0
+    peak_succ_rate = 0.0
+    peak_iter = 0
+
+    # Learning rate state
+    current_lr = args.lr
+    lr_decayed = False
 
     for i in range(1, args.iterations + 1):
         result = algo.train()
@@ -1213,6 +1228,11 @@ def main():
         tout_rate = result.get("custom_metrics", {}).get("tout_ep_bin_mean", 0.0) or 0.0
         goal_dist_end = result.get("custom_metrics", {}).get("goal_dist_end_mean_mean", -1.0) or -1.0
         goal_dist_min = result.get("custom_metrics", {}).get("goal_dist_min_mean_mean", -1.0) or -1.0
+
+        # Track peak performance
+        if succ_rate > peak_succ_rate:
+            peak_succ_rate = succ_rate
+            peak_iter = i
 
         print(
             f"[iter {i:4d}] reward={ep_reward:+.2f} succ={succ_rate:.2%} coll={coll_rate:.2%} tout={tout_rate:.2%} "
@@ -1230,6 +1250,28 @@ def main():
             best_succ_rate = succ_rate
             best_reward = ep_reward
             algo.save(os.path.join(args.out_dir, "best"))
+
+        # Learning rate decay on plateau
+        if args.lr_decay_on_plateau and not lr_decayed:
+            if succ_rate >= args.lr_decay_succ_threshold:
+                new_lr = max(args.lr_min, current_lr * args.lr_decay_factor)
+                if new_lr < current_lr:
+                    current_lr = new_lr
+                    # Update learning rate in algorithm
+                    algo.workers.foreach_worker(
+                        lambda w: w.get_policy().config.update({"lr": new_lr})
+                    )
+                    print(f"[shipMARL] LR decayed to {new_lr:.2e} at iter {i} (succ={succ_rate:.2%})")
+                    lr_decayed = True
+
+        # Collapse detection: stop if performance drops significantly from peak
+        if args.stop_on_collapse and i >= args.early_stop_min_iter:
+            drop = peak_succ_rate - succ_rate
+            if peak_succ_rate >= 0.90 and drop >= args.collapse_drop_threshold:
+                print(f"[shipMARL] Collapse detected at iter {i}: "
+                      f"succ={succ_rate:.2%} dropped {drop:.2%} from peak {peak_succ_rate:.2%} at iter {peak_iter}")
+                algo.save(os.path.join(args.out_dir, "collapse_stop"))
+                break
 
         # Early stopping check
         if args.early_stop and i >= args.early_stop_min_iter:

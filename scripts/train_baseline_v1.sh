@@ -16,6 +16,7 @@ MODEL="gnn_lstm"
 # Training hyperparameters (conservative for stability)
 LR=1e-4                    # Lower learning rate for stability
 ENTROPY_COEFF=0.015        # Slightly higher entropy for exploration
+CLIP_PARAM=0.1             # Conservative clip (default 0.2 causes instability)
 TRAIN_BATCH=4000           # Standard batch size
 SGD_MINIBATCH=256          # Standard minibatch
 NUM_SGD_ITER=10            # Standard SGD iterations
@@ -30,19 +31,29 @@ T_MAX=180.0                # Max episode time
 # Early stopping (prevents policy collapse from overtraining)
 EARLY_STOP=true            # Enable early stopping
 EARLY_STOP_SUCC=0.95       # Stop when success rate >= 95%
-EARLY_STOP_PATIENCE=20     # Require 20 consecutive iterations
-EARLY_STOP_MIN_ITER=100    # Don't stop before iter 100
+EARLY_STOP_PATIENCE=10     # Require 10 consecutive iterations (reduced from 20)
+EARLY_STOP_MIN_ITER=80     # Don't stop before iter 80
+
+# Stability controls (NEW)
+LR_DECAY_ON_PLATEAU=true   # Decay LR when success plateaus
+LR_DECAY_FACTOR=0.5        # Halve LR when triggered
+LR_DECAY_SUCC=0.90         # Trigger LR decay at 90% success
+LR_MIN=1e-5                # Minimum LR
+STOP_ON_COLLAPSE=true      # Stop if performance collapses
+COLLAPSE_DROP=0.15         # Stop if success drops 15% from peak
 
 echo "============================================================================"
-echo "Training Baseline Model v1"
+echo "Training Baseline Model v1 (Stable)"
 echo "============================================================================"
 echo "Output:     ${OUTPUT_DIR}"
 echo "AIS Config: ${AIS_CONFIG}"
 echo "Iterations: ${ITERATIONS} (max)"
 echo "Model:      ${MODEL}"
-echo "LR:         ${LR}"
+echo "LR:         ${LR} (decay=${LR_DECAY_ON_PLATEAU}, min=${LR_MIN})"
+echo "Clip:       ${CLIP_PARAM}"
 echo "Lagrangian: ENABLED"
 echo "Early Stop: ${EARLY_STOP} (succ>=${EARLY_STOP_SUCC} for ${EARLY_STOP_PATIENCE} iters, min=${EARLY_STOP_MIN_ITER})"
+echo "Collapse:   ${STOP_ON_COLLAPSE} (drop>=${COLLAPSE_DROP})"
 echo "============================================================================"
 
 # Create output directory
@@ -52,6 +63,15 @@ mkdir -p "${OUTPUT_DIR}"
 EARLY_STOP_ARGS=""
 if [ "${EARLY_STOP}" = "true" ]; then
     EARLY_STOP_ARGS="--early-stop --early-stop-succ ${EARLY_STOP_SUCC} --early-stop-patience ${EARLY_STOP_PATIENCE} --early-stop-min-iter ${EARLY_STOP_MIN_ITER}"
+fi
+
+# Build stability args
+STABILITY_ARGS=""
+if [ "${LR_DECAY_ON_PLATEAU}" = "true" ]; then
+    STABILITY_ARGS="${STABILITY_ARGS} --lr-decay-on-plateau --lr-decay-factor ${LR_DECAY_FACTOR} --lr-decay-succ-threshold ${LR_DECAY_SUCC} --lr-min ${LR_MIN}"
+fi
+if [ "${STOP_ON_COLLAPSE}" = "true" ]; then
+    STABILITY_ARGS="${STABILITY_ARGS} --stop-on-collapse --collapse-drop-threshold ${COLLAPSE_DROP}"
 fi
 
 # Run training
@@ -65,6 +85,7 @@ PYTHONPATH=. python scripts/train_rllib_ppo_pf.py \
     --dt ${DT} \
     --T_max ${T_MAX} \
     --lr ${LR} \
+    --clip-param ${CLIP_PARAM} \
     --entropy-coeff ${ENTROPY_COEFF} \
     --train-batch-size ${TRAIN_BATCH} \
     --sgd-minibatch-size ${SGD_MINIBATCH} \
@@ -73,7 +94,8 @@ PYTHONPATH=. python scripts/train_rllib_ppo_pf.py \
     --num-envs-per-worker ${ENVS_PER_WORKER} \
     --checkpoint-freq 10 \
     --out-dir ${OUTPUT_DIR} \
-    ${EARLY_STOP_ARGS}
+    ${EARLY_STOP_ARGS} \
+    ${STABILITY_ARGS}
 
 echo "============================================================================"
 echo "Training complete!"
