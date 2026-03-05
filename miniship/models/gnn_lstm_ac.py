@@ -333,7 +333,9 @@ class MiniShipGNNLSTMActorCritic(TorchModelV2, nn.Module):
         # 第二层 MPNN（此处简单地仍使用初始邻居表示 h_nei；若要更完整的图更新可以后续扩展）
         h2 = self.gnn2(h1, h_nei, edge_feat, mask)
 
-        gnn_emb = h2  # [B*T, D_gnn]
+        # Skip connection: 保留原始自船信息（尤其是目标方向）
+        # 这确保目标信号不会在 GNN 聚合中被稀释
+        gnn_emb = h2 + h_self  # [B*T, D_gnn]
 
         # ---------- LSTM：时间维 ----------
         lstm_in = self._add_time_dim(gnn_emb, seq_lens, self.max_seq_len)  # [B, T, D_gnn]
